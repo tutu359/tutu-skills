@@ -9,4 +9,6 @@ Write one JSON object per line. Each job requires `prompt` and may override gene
 
 Supported fields are `prompt`, `size`, `quality`, `n`, `out`, and `model`. Relative `out` paths are resolved under `--out-dir`. Blank lines are ignored.
 
+Batch concurrency is controlled outside the JSONL file: `--concurrency` overrides `IMAGE_API_BATCH_CONCURRENCY`, which defaults to `5`.
+
 Use unique output names. When `n` is greater than one, the CLI adds `-1`, `-2`, and so on before the extension. The batch command prints a JSON summary and exits nonzero if any job fails.

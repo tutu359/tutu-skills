@@ -24,13 +24,14 @@ import (
 )
 
 const (
-	defaultModel       = "gpt-image-2"
-	defaultSize        = "1024x1024"
-	defaultQuality     = "auto"
-	defaultOutDir      = "output/imagegen"
-	defaultMaxAttempts = 3
-	retryBaseDelay     = 750 * time.Millisecond
-	retryMaxDelay      = 30 * time.Second
+	defaultModel            = "gpt-image-2"
+	defaultSize             = "auto"
+	defaultQuality          = "auto"
+	defaultOutDir           = "output/imagegen"
+	defaultMaxAttempts      = 3
+	defaultBatchConcurrency = 5
+	retryBaseDelay          = 750 * time.Millisecond
+	retryMaxDelay           = 30 * time.Second
 )
 
 var retryable = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true, 524: true}
@@ -172,6 +173,18 @@ func maxAttemptsFromEnv() (int, error) {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 1 {
 		return 0, errors.New("IMAGE_API_MAX_ATTEMPTS must be a positive integer")
+	}
+	return value, nil
+}
+
+func batchConcurrencyFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("IMAGE_API_BATCH_CONCURRENCY"))
+	if raw == "" {
+		return defaultBatchConcurrency, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, errors.New("IMAGE_API_BATCH_CONCURRENCY must be a positive integer")
 	}
 	return value, nil
 }
@@ -535,10 +548,13 @@ func runEdit(argv []string) error {
 func runBatch(argv []string) error {
 	fs := flag.NewFlagSet("generate-batch", flag.ContinueOnError)
 	var input string
-	var concurrency int
+	concurrency, err := batchConcurrencyFromEnv()
+	if err != nil {
+		return err
+	}
 	var failFast bool
 	fs.StringVar(&input, "input", "", "JSONL input path")
-	fs.IntVar(&concurrency, "concurrency", 2, "parallel jobs")
+	fs.IntVar(&concurrency, "concurrency", concurrency, "parallel jobs")
 	fs.BoolVar(&failFast, "fail-fast", false, "stop scheduling after a failure")
 	var args commonArgs
 	if err := parseCommon(fs, argv, &args); err != nil {
@@ -630,7 +646,7 @@ func runBatch(argv []string) error {
 			failures++
 		}
 	}
-	printJSON(map[string]any{"jobs": results, "succeeded": succeeded, "failed": failures})
+	printJSON(map[string]any{"concurrency": concurrency, "jobs": results, "succeeded": succeeded, "failed": failures})
 	if failures > 0 {
 		return errors.New("one or more batch jobs failed")
 	}

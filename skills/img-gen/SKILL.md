@@ -26,7 +26,7 @@ Run `chmod +x <executable>` if execute permission was not preserved. Do not comp
 6. If revision is needed, change one targeted aspect per iteration and re-check.
 7. Report absolute output paths, the final prompt or prompt set, size, quality, and model.
 
-## Prompt structure
+## Universal prompt specification
 
 Use only relevant lines:
 
@@ -45,6 +45,8 @@ Avoid: <must not include>
 ```
 
 Do not add detail merely to fill the schema. For text in images, quote it verbatim and request exact rendering.
+
+The prompt describes visual intent. Keep API controls such as model name, resolution tier, output size, aspect ratio, quality, and output path out of the prompt unless the user explicitly wants those words rendered in the image.
 
 ## Generate one image
 
@@ -74,7 +76,7 @@ Repeat `--image` for multiple reference or compositing inputs. Use `--mask mask.
 
 ## Resolution requests
 
-Users may request image size in natural language. Translate the request into `--size WIDTHxHEIGHT`; do not pass `1K`, `2K`, or `4K` directly to the CLI.
+If the user does not specify a size, use `--size auto` and let the configured provider choose. If the user requests a size in natural language, translate it into `--size WIDTHxHEIGHT`; do not pass `1K`, `2K`, or `4K` directly to the CLI.
 
 | Request | Square | Landscape | Portrait |
 | --- | --- | --- | --- |
@@ -82,7 +84,7 @@ Users may request image size in natural language. Translate the request into `--
 | 2K | `2048x2048` | `2048x1152` | `1152x2048` |
 | 4K | `4096x4096` | `3840x2160` | `2160x3840` |
 
-Use the user's stated orientation or infer it from the requested asset. If orientation is not implied, default to a square image and state the chosen size. Size controls output resolution; `--quality` is a separate quality setting. The configured API provider ultimately decides which dimensions it accepts.
+Use the user's stated orientation or infer it from the requested asset. If the user specifies only a resolution tier and orientation is not implied, use the square mapping and state the chosen size. Pass the requested size without applying model-specific limits; the configured provider decides whether to accept, adjust, or reject it. Size controls output resolution; `--quality` is a separate quality setting.
 
 ## Generate a batch
 
@@ -91,8 +93,7 @@ Read [references/batch-format.md](references/batch-format.md) before preparing a
 ```bash
 "<skill-dir>/bin/img-gen-darwin-arm64" generate-batch \
   --input "tmp/imagegen/jobs.jsonl" \
-  --out-dir "output/imagegen" \
-  --concurrency 2
+  --out-dir "output/imagegen"
 ```
 
 ## Configuration and safety
@@ -102,7 +103,8 @@ Read [references/batch-format.md](references/batch-format.md) before preparing a
 - If the key is absent, tell the user to set it locally and confirm when ready. Never ask them to paste it into chat.
 - Resolve the model in this order: `--model`, `IMAGE_API_MODEL`, then `gpt-image-2`.
 - Resolve total request attempts in this order: `--max-attempts`, `IMAGE_API_MAX_ATTEMPTS`, then `3`. Three attempts means one initial request and up to two retries.
-- Default to size `1024x1024` and quality `auto`.
+- Resolve batch concurrency in this order: `--concurrency`, `IMAGE_API_BATCH_CONCURRENCY`, then `5`. This is the maximum number of batch jobs sent at the same time.
+- Default to size `auto` and quality `auto`.
 - Use `--dry-run` to validate a configured request without network access or requiring an API key.
 - Save project-bound assets inside the current project. The CLI default is `output/imagegen/`.
 - Do not overwrite files unless the user explicitly authorizes it and `--force` is passed.
