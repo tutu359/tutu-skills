@@ -107,4 +107,4 @@ Read [references/troubleshooting.md](references/troubleshooting.md) only after a
 
 ## Finish
 
-Inspect generated outputs for the subject, composition, text accuracy, requested constraints, and artifacts. Report absolute output paths, prompt or prompt set, size, quality, and model.
+After the binary successfully returns the generated image, deliver it to the user immediately using Markdown image syntax with the absolute output path: `![Generated image](/absolute/path/to/image.png)`. Do not inspect or evaluate the output for subject, composition, text accuracy, requested constraints, or artifacts.
