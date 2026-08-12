@@ -11,7 +11,7 @@ Generate and edit images with the bundled native macOS and Windows CLI. No Pytho
 
 For every normal `generate`, `edit`, or `generate-batch` request:
 
-1. Prepare only the prompt and files required by the request.
+1. Use only the prompt, attachments, and settings the user explicitly provides.
 2. Select the launcher from the current operating system, then run it directly:
    - macOS: `bin/img-gen`
    - Windows: `bin\img-gen.cmd`
@@ -20,7 +20,7 @@ For every normal `generate`, `edit`, or `generate-batch` request:
 4. On macOS, do not run `chmod` preemptively. Repair execution permission only after a permission-denied error, then retry once.
 5. In the same session, reuse established output conventions and request settings unless the user changes them.
 
-Do not delay the first request with architecture checks, configuration probes, dry runs, compilation, or reference-file reads that the request does not require.
+For a normal generation request, call the binary immediately. Do not delay the first request with workspace searches, attachment searches, architecture checks, configuration probes, dry runs, compilation, or reference-file reads. If the user did not provide an attachment or file path, do not ask for one and do not search the workspace, clipboard, temporary folders, or other locations for one. Generate from the text prompt alone. Troubleshoot only after the binary reports an error.
 
 In the examples below, replace `<img-gen>` with the launcher for the current operating system.
 
@@ -32,11 +32,13 @@ In the examples below, replace `<img-gen>` with the launcher for the current ope
 
 ## Prompts
 
-Preserve detailed prompts. For a simple request, add only details needed to make the image usable; do not force every prompt into a long template. Do not invent brands, people, slogans, or unrelated objects.
+Treat the user's prompt as authoritative. Pass it unchanged unless the user explicitly asks to rewrite, optimize, expand, translate, or otherwise modify it. Do not add, remove, reinterpret, or "improve" creative details on the user's behalf.
 
-Include relevant items such as intended use, subject, scene, style, composition, lighting, palette, exact text, constraints, and avoid items. Quote text that must appear verbatim.
+Preserve every provided detail, including intended use, subject, scene, style, composition, lighting, palette, camera treatment, exact text, constraints, and avoid items. Do not invent any of these details when they are absent. Quote text that must appear verbatim.
 
 Keep API controls such as model, size, quality, and output path in CLI arguments rather than the visual prompt unless the user wants those words rendered in the image.
+
+Do not infer a reference image from wording such as "poster," "cover," or "screenshot." Use an image input only when the user actually provides an attachment or an explicit file path. If no image is provided, do not ask for one and do not search for one; handle a generation request from the text prompt alone. Never pretend that a missing image exists.
 
 ## Generate one image
 
@@ -85,7 +87,7 @@ Supported job fields are `prompt`, `out`, `size`, `quality`, `n`, and `model`. U
 
 ## Sizes
 
-If the user does not specify a size, use `--size auto`. Translate natural-language resolution requests to dimensions:
+If the user does not specify a size, use `--size auto`; never choose 1K, 2K, or 4K on the user's behalf. Translate explicit natural-language resolution requests to dimensions:
 
 | Request | Square | Landscape | Portrait |
 | --- | --- | --- | --- |
