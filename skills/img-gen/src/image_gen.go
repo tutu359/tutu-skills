@@ -455,11 +455,14 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 	return map[string]any{"model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
 }
 
-func printJSON(value any) {
-	encoder := json.NewEncoder(os.Stdout)
+func writeJSON(w io.Writer, value any) error {
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(value)
+	if err := encoder.Encode(value); err != nil {
+		return fmt.Errorf("could not write JSON output: %w", err)
+	}
+	return nil
 }
 
 func parseCommon(fs *flag.FlagSet, argv []string, args *commonArgs) error {
@@ -497,7 +500,7 @@ func (s *stringList) Set(value string) error {
 	return nil
 }
 
-func runGenerate(argv []string) error {
+func runGenerate(argv []string, output io.Writer) error {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	var prompt, promptFile, out string
 	fs.StringVar(&prompt, "prompt", "", "prompt text")
@@ -512,13 +515,13 @@ func runGenerate(argv []string) error {
 		return err
 	}
 	result, err := generate(finalPrompt, out, args)
-	if err == nil {
-		printJSON(result)
+	if err != nil {
+		return err
 	}
-	return err
+	return writeJSON(output, result)
 }
 
-func runEdit(argv []string) error {
+func runEdit(argv []string, output io.Writer) error {
 	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
 	var images stringList
 	var prompt, promptFile, mask, out string
@@ -539,13 +542,13 @@ func runEdit(argv []string) error {
 		return err
 	}
 	result, err := edit(finalPrompt, images, mask, out, args)
-	if err == nil {
-		printJSON(result)
+	if err != nil {
+		return err
 	}
-	return err
+	return writeJSON(output, result)
 }
 
-func runBatch(argv []string) error {
+func runBatch(argv []string, output io.Writer) error {
 	fs := flag.NewFlagSet("generate-batch", flag.ContinueOnError)
 	var input string
 	concurrency, err := batchConcurrencyFromEnv()
@@ -646,7 +649,9 @@ func runBatch(argv []string) error {
 			failures++
 		}
 	}
-	printJSON(map[string]any{"concurrency": concurrency, "jobs": results, "succeeded": succeeded, "failed": failures})
+	if err := writeJSON(output, map[string]any{"concurrency": concurrency, "jobs": results, "succeeded": succeeded, "failed": failures}); err != nil {
+		return err
+	}
 	if failures > 0 {
 		return errors.New("one or more batch jobs failed")
 	}
@@ -665,11 +670,11 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "generate":
-		err = runGenerate(os.Args[2:])
+		err = runGenerate(os.Args[2:], os.Stdout)
 	case "generate-batch":
-		err = runBatch(os.Args[2:])
+		err = runBatch(os.Args[2:], os.Stdout)
 	case "edit":
-		err = runEdit(os.Args[2:])
+		err = runEdit(os.Args[2:], os.Stdout)
 	case "--help", "-h", "help":
 		usage()
 		return

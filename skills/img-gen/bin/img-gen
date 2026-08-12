@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+case "$(uname -m)" in
+arm64)
+	executable="$script_dir/img-gen-darwin-arm64"
+	;;
+x86_64)
+	executable="$script_dir/img-gen-darwin-amd64"
+	;;
+*)
+	printf 'error: unsupported macOS architecture: %s\n' "$(uname -m)" >&2
+	exit 2
+	;;
+esac
+
+exec "$executable" "$@"

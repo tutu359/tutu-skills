@@ -1,82 +1,91 @@
 ---
 name: img-gen
-description: Generate or edit raster images through a configurable OpenAI-compatible Image API. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits through a separately configured API provider.
+description: Generate and edit raster images through a configurable OpenAI-compatible Image API. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits through a separately configured API provider.
 ---
 
 # img-gen
 
-Generate and edit images with the bundled native CLI. This skill is host-neutral and can be used by Agent Skills-compatible coding agents such as Claude Code and Codex. No Python, Node.js, Go, or package installation is required during normal use.
+Generate and edit images with the bundled native macOS and Windows CLI. No Python, Node.js, Go, or package installation is required during normal use.
 
-## Select the executable
+## Fast path
 
-Choose once from the current Mac CPU architecture:
+For every normal `generate`, `edit`, or `generate-batch` request:
 
-- Apple Silicon: `bin/img-gen-darwin-arm64`
-- Intel: `bin/img-gen-darwin-amd64`
+1. Prepare only the prompt and files required by the request.
+2. Select the launcher from the current operating system, then run it directly:
+   - macOS: `bin/img-gen`
+   - Windows: `bin\img-gen.cmd`
+   Both launchers select the correct CPU architecture.
+3. Let the CLI validate API configuration, output paths, and arguments. Do not pre-check environment variables.
+4. On macOS, do not run `chmod` preemptively. Repair execution permission only after a permission-denied error, then retry once.
+5. In the same session, reuse established output conventions and request settings unless the user changes them.
 
-Run `chmod +x <executable>` if execute permission was not preserved. Do not compile from source during normal use.
+Do not delay the first request with architecture checks, configuration probes, dry runs, compilation, or reference-file reads that the request does not require.
 
-## Workflow
+In the examples below, replace `<img-gen>` with the launcher for the current operating system.
 
-1. Decide whether the request is a new image, an edit, or multiple distinct assets or variants.
-2. Collect the prompt, intended use, exact text, visual constraints, and avoid items.
-3. Shape the prompt only as much as needed. Preserve detailed prompts; clarify generic prompts without inventing brands, people, slogans, or unrelated objects.
-4. Run `generate` for one prompt, `edit` for changes to existing images, or `generate-batch` for JSONL jobs.
-5. Inspect each output for subject, composition, text accuracy, constraints, and visible artifacts.
-6. If revision is needed, change one targeted aspect per iteration and re-check.
-7. Report absolute output paths, the final prompt or prompt set, size, quality, and model.
+## Choose the operation
 
-## Universal prompt specification
+- Use `generate` for one prompt. Use `--n` only for variants of that same prompt.
+- Use `edit` to change or combine existing images. Inspect each input first and preserve the originals.
+- Use `generate-batch` for distinct prompts or assets.
 
-Use only relevant lines:
+## Prompts
 
-```text
-Asset type: <where the image will be used>
-Primary request: <the user's request>
-Scene/backdrop: <environment>
-Subject: <main subject>
-Style/medium: <photo, illustration, 3D, etc.>
-Composition/framing: <camera angle, crop, placement, negative space>
-Lighting/mood: <lighting and mood>
-Color palette: <palette notes>
-Text (verbatim): "<exact text>"
-Constraints: <must keep or include>
-Avoid: <must not include>
-```
+Preserve detailed prompts. For a simple request, add only details needed to make the image usable; do not force every prompt into a long template. Do not invent brands, people, slogans, or unrelated objects.
 
-Do not add detail merely to fill the schema. For text in images, quote it verbatim and request exact rendering.
+Include relevant items such as intended use, subject, scene, style, composition, lighting, palette, exact text, constraints, and avoid items. Quote text that must appear verbatim.
 
-The prompt describes visual intent. Keep API controls such as model name, resolution tier, output size, aspect ratio, quality, and output path out of the prompt unless the user explicitly wants those words rendered in the image.
+Keep API controls such as model, size, quality, and output path in CLI arguments rather than the visual prompt unless the user wants those words rendered in the image.
 
 ## Generate one image
 
 ```bash
-"<skill-dir>/bin/img-gen-darwin-arm64" generate \
+"<img-gen>" generate \
   --prompt "A small blue nebula in a glass bottle, studio product photo" \
   --size 1024x1024 \
   --quality auto \
   --out "output/imagegen/nebula.png"
 ```
 
-Use `--prompt-file` for long prompts. Use `--n` only for variants of the same prompt. Distinct assets belong in separate calls or a batch.
+Use `--prompt-file` for a prompt that is inconvenient to pass safely as one argument.
 
 ## Edit an image
 
-Inspect each input image before editing. State its role and repeat invariants in the prompt so unrelated details do not drift.
+State each input's role and repeat invariants so unrelated details do not drift.
 
 ```bash
-"<skill-dir>/bin/img-gen-darwin-arm64" edit \
+"<img-gen>" edit \
   --image "input/product.png" \
   --prompt "Replace only the background with a warm studio backdrop. Keep the product, label, proportions, and edges unchanged." \
   --quality auto \
   --out "output/imagegen/product-edited.png"
 ```
 
-Repeat `--image` for multiple reference or compositing inputs. Use `--mask mask.png` for a localized edit when a compatible PNG mask is available. Preserve originals and always write edits to a new output path.
+Repeat `--image` for multiple inputs. Use `--mask` when a compatible PNG mask is available. Always write edits to a new path unless the user explicitly authorizes overwriting.
 
-## Resolution requests
+## Generate a batch
 
-If the user does not specify a size, use `--size auto` and let the configured provider choose. If the user requests a size in natural language, translate it into `--size WIDTHxHEIGHT`; do not pass `1K`, `2K`, or `4K` directly to the CLI.
+For ordinary batches, write JSONL directly without first reading another file. Each non-empty line is one job:
+
+```jsonl
+{"prompt":"A blue ceramic mug on white","out":"mug.png"}
+{"prompt":"A red paper kite in a clear sky","size":"1536x1024","quality":"low","n":2,"out":"kite.png"}
+```
+
+Then run:
+
+```bash
+"<img-gen>" generate-batch \
+  --input "tmp/imagegen/jobs.jsonl" \
+  --out-dir "output/imagegen"
+```
+
+Supported job fields are `prompt`, `out`, `size`, `quality`, `n`, and `model`. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
+
+## Sizes
+
+If the user does not specify a size, use `--size auto`. Translate natural-language resolution requests to dimensions:
 
 | Request | Square | Landscape | Portrait |
 | --- | --- | --- | --- |
@@ -84,36 +93,18 @@ If the user does not specify a size, use `--size auto` and let the configured pr
 | 2K | `2048x2048` | `2048x1152` | `1152x2048` |
 | 4K | `4096x4096` | `3840x2160` | `2160x3840` |
 
-Use the user's stated orientation or infer it from the requested asset. If the user specifies only a resolution tier and orientation is not implied, use the square mapping and state the chosen size. Pass the requested size without applying model-specific limits; the configured provider decides whether to accept, adjust, or reject it. Size controls output resolution; `--quality` is a separate quality setting.
+Use the requested orientation or infer it from the asset. Pass the requested dimensions without imposing provider-specific limits.
 
-## Generate a batch
+## Configuration and failures
 
-Read [references/batch-format.md](references/batch-format.md) before preparing a batch. Then run:
+- Execute the requested command first. Let the CLI report missing configuration or invalid arguments instead of probing in advance.
+- Never print or request API keys in chat.
+- Use `--dry-run` only when validation is requested or needed to diagnose an argument problem.
+- Do not overwrite files unless the user authorizes it and `--force` is passed.
+- Native transparent output is not guaranteed.
 
-```bash
-"<skill-dir>/bin/img-gen-darwin-arm64" generate-batch \
-  --input "tmp/imagegen/jobs.jsonl" \
-  --out-dir "output/imagegen"
-```
+Read [references/troubleshooting.md](references/troubleshooting.md) only after a configuration, permission, retry, timeout, or provider error.
 
-## Configuration and safety
+## Finish
 
-- Require an API base URL through `IMAGE_API_BASE_URL` or `--base-url`. Do not assume or silently select an API provider.
-- Require `IMAGE_API_KEY` for network requests. Never place it in a command, file, prompt, log, or response.
-- If the key is absent, tell the user to set it locally and confirm when ready. Never ask them to paste it into chat.
-- Resolve the model in this order: `--model`, `IMAGE_API_MODEL`, then `gpt-image-2`.
-- Resolve total request attempts in this order: `--max-attempts`, `IMAGE_API_MAX_ATTEMPTS`, then `3`. Three attempts means one initial request and up to two retries.
-- Resolve batch concurrency in this order: `--concurrency`, `IMAGE_API_BATCH_CONCURRENCY`, then `5`. This is the maximum number of batch jobs sent at the same time.
-- Default to size `auto` and quality `auto`.
-- Use `--dry-run` to validate a configured request without network access or requiring an API key.
-- Save project-bound assets inside the current project. The CLI default is `output/imagegen/`.
-- Do not overwrite files unless the user explicitly authorizes it and `--force` is passed.
-- Native transparent output is not guaranteed. Do not promise it or silently switch tools or models.
-
-## Failure handling
-
-- The CLI retries network timeouts and HTTP 429/500/502/503/504/524 failures with bounded backoff and randomized delay. It honors a valid `Retry-After` response header, capped at 30 seconds.
-- Before each retry, the CLI prints the attempt number, a non-sensitive failure category, and the delay. It never prints request headers, response bodies, or keys.
-- On repeated timeout, suggest `--quality low`, a square size, fewer concurrent jobs, or a later retry.
-- Do not retry authentication, validation, or other ordinary 4xx errors.
-- Never expose an Authorization header or full key when reporting errors.
+Inspect generated outputs for the subject, composition, text accuracy, requested constraints, and artifacts. Report absolute output paths, prompt or prompt set, size, quality, and model.
