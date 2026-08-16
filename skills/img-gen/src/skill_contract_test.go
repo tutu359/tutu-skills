@@ -34,7 +34,7 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"one **Generation Set**",
 		"invoke `<img-gen> batch` exactly once",
 		"Do not start one shell command per image",
-		"repeat the prompt **exactly** in every `generate` job",
+		"repeat the prompt **exactly** in every job, including `edit` jobs",
 		"Make only the `out` values unique",
 		"Create a derived prompt only for a dimension the user explicitly authorizes",
 		"the user must authorize a dimension such as style, pose, or scene",

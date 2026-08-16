@@ -36,7 +36,7 @@ Use unique, deterministic, user-appropriate output names. The names may identify
 
 ### No requested differences means exact prompts
 
-If the user only asks for multiple copies and does not ask for differences, repeat the prompt **exactly** in every `generate` job. Do not add numbering, variation language, or other text to the prompt. Make only the `out` values unique.
+If the user only asks for multiple copies and does not ask for differences, repeat the prompt **exactly** in every job, including `edit` jobs. Do not add numbering, variation language, or other text to the prompt. Make only the `out` values unique.
 
 ```jsonl
 {"operation":"generate","prompt":"A small blue nebula in a glass bottle, studio product photo","out":"nebula-01.png"}
