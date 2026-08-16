@@ -1,0 +1,82 @@
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func readSkillContract(t *testing.T) (string, string) {
+	t.Helper()
+	skill, err := os.ReadFile("../SKILL.md")
+	if err != nil {
+		t.Fatalf("read SKILL.md: %v", err)
+	}
+	batch, err := os.ReadFile("../references/batch-format.md")
+	if err != nil {
+		t.Fatalf("read batch-format.md: %v", err)
+	}
+	return string(skill), string(batch)
+}
+
+func requireDocFragments(t *testing.T, doc string, fragments ...string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if !strings.Contains(doc, fragment) {
+			t.Errorf("documentation is missing required contract fragment %q", fragment)
+		}
+	}
+}
+
+func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
+	skill, batch := readSkillContract(t)
+	requireDocFragments(t, skill,
+		"one **Generation Set**",
+		"invoke `<img-gen> batch` exactly once",
+		"Do not start one shell command per image",
+		"repeat the prompt **exactly** in every `generate` job",
+		"Make only the `out` values unique",
+		"Create a derived prompt only for a dimension the user explicitly authorizes",
+		"When an authorized dimension has no concrete value, choose suitable values and generate directly",
+		"Every derived prompt must be self-contained",
+		"Performance or rendering variants",
+		"World expansion",
+		"person, character, object, scene, background, environment, palette, or style",
+		"Consistency Anchor",
+		"A reference image is a stronger visual anchor than prose",
+		"use the explicit `edit` operation",
+		"Do not inspect input images on the normal path",
+		"do not inspect, score, select, compare for similarity, or visually retry",
+		"Treat the user's prompt as authoritative",
+		"control plane",
+		"execution plane",
+		"Concurrency priority is `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"The CLI preflights every operation",
+		"`--fail-fast` stops scheduling jobs not yet started",
+		"deliver each successful output immediately",
+	)
+	requireDocFragments(t, batch,
+		"Every job must explicitly declare `operation`",
+		"Do not add `n` or another quantity field",
+		"Images are uploaded in exactly the array order",
+		"Relative `image` and `mask` paths are resolved",
+		"Relative `out` paths are resolved under the command's `--out-dir`",
+		"The CLI validates every operation",
+		"Concurrency is selected by `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"successful files are kept",
+		"process exits nonzero if any job fails",
+	)
+}
+
+func TestSkillDocumentsContainRequiredBatchFixtures(t *testing.T) {
+	skill, _ := readSkillContract(t)
+	requireDocFragments(t, skill,
+		`{"operation":"generate","prompt":"A small blue nebula in a glass bottle, studio product photo","out":"nebula-01.png"}`,
+		`{"operation":"generate","prompt":"A small blue nebula in a glass bottle, studio product photo","out":"nebula-02.png"}`,
+		`{"operation":"generate","prompt":"A red paper kite above a coastal cliff at sunrise; landscape composition, clear sky, no text; render in watercolor"`,
+		`{"operation":"generate","prompt":"A red paper kite above a coastal cliff at sunrise; landscape composition, clear sky, no text; render in charcoal"`,
+		`{"operation":"generate","prompt":"The same floating city of brass bridges, blue glass towers, and perpetual twilight; show the crowded eastern market`,
+		`{"operation":"generate","prompt":"The same floating city of brass bridges, blue glass towers, and perpetual twilight; show the quiet western observatory`,
+		`{"operation":"edit","prompt":"Combine the supplied images into one editorial collage. Preserve the user's composition and do not add text.","image":["inputs/subject.png","inputs/texture.png","inputs/layout.png"],"out":"collage-01.png"}`,
+	)
+}

@@ -12,7 +12,7 @@ The `batch` command reads one JSON object per non-empty line. Every job must exp
 - `operation` is required and must be exactly `generate` or `edit`. Missing or unknown operations fail before any network request.
 - `prompt` is required and must be non-empty. The prompt is sent unchanged; the CLI does not interpret image roles or rewrite it.
 - `out` is required and must be unique across both generate and edit jobs.
-- `model`, `size`, and `quality` are optional per-job overrides. Each job requests exactly one image, preserving the single-image contract of the individual commands.
+- `model`, `size`, and `quality` are optional per-job overrides. Each job requests exactly one image, preserving the single-image contract of the individual commands. Do not add `n` or another quantity field to a job.
 
 ## Generate jobs
 
