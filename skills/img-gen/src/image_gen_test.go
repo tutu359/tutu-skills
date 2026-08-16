@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type failingWriter struct {
@@ -212,7 +214,7 @@ func TestRunBatchReturnsOutputErrorAfterSavingImage(t *testing.T) {
 	t.Setenv("IMAGE_API_BATCH_CONCURRENCY", "1")
 	tempDir := t.TempDir()
 	input := filepath.Join(tempDir, "jobs.jsonl")
-	if err := os.WriteFile(input, []byte("{\"prompt\":\"test image\",\"out\":\"result.png\"}\n"), 0644); err != nil {
+	if err := os.WriteFile(input, []byte("{\"operation\":\"generate\",\"prompt\":\"test image\",\"out\":\"result.png\"}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	outDir := filepath.Join(tempDir, "output")
@@ -322,5 +324,232 @@ func TestSingleImageCommandsRejectUnexpectedResponseCardinality(t *testing.T) {
 				t.Fatalf("saved %d output files after cardinality failure, want 0", len(entries))
 			}
 		})
+	}
+}
+
+func writeBatchInput(t *testing.T, jobs string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	if err := os.WriteFile(path, []byte(jobs), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func decodeBatchSummary(t *testing.T, output *bytes.Buffer) struct {
+	Concurrency int           `json:"concurrency"`
+	Jobs        []batchResult `json:"jobs"`
+	Succeeded   int           `json:"succeeded"`
+	Failed      int           `json:"failed"`
+} {
+	t.Helper()
+	var summary struct {
+		Concurrency int           `json:"concurrency"`
+		Jobs        []batchResult `json:"jobs"`
+		Succeeded   int           `json:"succeeded"`
+		Failed      int           `json:"failed"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {
+		t.Fatalf("decode batch summary: %v\n%s", err, output.String())
+	}
+	return summary
+}
+
+func TestRunBatchPreflightsJobsBeforeNetwork(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
+	defer server.Close()
+	t.Setenv("IMAGE_API_KEY", "test-key")
+	outDir := t.TempDir()
+	cases := []struct {
+		name string
+		jobs string
+		want string
+	}{
+		{"missing operation", "{\"prompt\":\"one\",\"out\":\"one.png\"}\n", "operation"},
+		{"unknown operation", "{\"operation\":\"edit\",\"prompt\":\"one\",\"out\":\"one.png\"}\n", "unknown operation"},
+		{"missing prompt", "{\"operation\":\"generate\",\"prompt\":\" \",\"out\":\"one.png\"}\n", "prompt"},
+		{"missing output", "{\"operation\":\"generate\",\"prompt\":\"one\",\"out\":\" \"}\n", "out"},
+		{"duplicate output", "{\"operation\":\"generate\",\"prompt\":\"one\",\"out\":\"same.png\"}\n{\"operation\":\"generate\",\"prompt\":\"two\",\"out\":\"./same.png\"}\n", "same output"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := runBatch([]string{"--input", writeBatchInput(t, tc.jobs), "--out-dir", outDir, "--base-url", server.URL}, &output)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runBatch error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("server received %d requests during preflight failures, want 0", requests)
+	}
+}
+
+func TestRunBatchResolvesRelativeOutputsAndRejectsExistingBeforeNetwork(t *testing.T) {
+	const png = "aGVsbG8="
+	var requestsMu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		requests++
+		requestsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	t.Setenv("IMAGE_API_KEY", "test-key")
+	t.Setenv("IMAGE_API_MAX_ATTEMPTS", "1")
+	root := t.TempDir()
+	outDir := filepath.Join(root, "out")
+	absolute := filepath.Join(root, "absolute.png")
+	input := writeBatchInput(t, fmt.Sprintf("{\"operation\":\"generate\",\"prompt\":\"one\",\"out\":\"nested/one.png\"}\n{\"operation\":\"generate\",\"prompt\":\"two\",\"out\":%q}\n", absolute))
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", outDir, "--base-url", server.URL, "--max-attempts", "1", "--concurrency", "2"}, &output); err != nil {
+		t.Fatalf("runBatch returned an error: %v", err)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if got, want := summary.Jobs[0].Outputs[0], mustAbs(t, filepath.Join(outDir, "nested", "one.png")); got != want {
+		t.Fatalf("relative output = %q, want %q", got, want)
+	}
+	if got, want := summary.Jobs[1].Outputs[0], mustAbs(t, absolute); got != want {
+		t.Fatalf("absolute output = %q, want %q", got, want)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "existing.png"), []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	requestsMu.Lock()
+	before := requests
+	requestsMu.Unlock()
+	err := runBatch([]string{"--input", writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"three\",\"out\":\"existing.png\"}\n"), "--out-dir", outDir, "--base-url", server.URL}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("existing output error = %v", err)
+	}
+	requestsMu.Lock()
+	after := requests
+	requestsMu.Unlock()
+	if after != before {
+		t.Fatalf("existing output preflight sent a request")
+	}
+}
+
+func mustAbs(t *testing.T, path string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return absolute
+}
+
+func TestRunBatchConcurrencyConfigPriority(t *testing.T) {
+	t.Setenv("IMAGE_API_BATCH_CONCURRENCY", "2")
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"one\",\"out\":\"one.png\"}\n")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"environment", nil, 2},
+		{"command line", []string{"--concurrency", "3"}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"--input", input, "--out-dir", t.TempDir(), "--base-url", "http://example.invalid", "--dry-run"}
+			args = append(args, tc.args...)
+			var output bytes.Buffer
+			if err := runBatch(args, &output); err != nil {
+				t.Fatalf("runBatch returned an error: %v", err)
+			}
+			if got := decodeBatchSummary(t, &output).Concurrency; got != tc.want {
+				t.Fatalf("concurrency = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunBatchUsesDynamicPoolAndKeepsInputOrder(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var mu sync.Mutex
+	starts := map[string]time.Time{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		starts[payload.Prompt] = time.Now()
+		mu.Unlock()
+		if payload.Prompt == "slow" {
+			time.Sleep(120 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	t.Setenv("IMAGE_API_KEY", "test-key")
+	t.Setenv("IMAGE_API_MAX_ATTEMPTS", "1")
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"slow\",\"out\":\"slow.png\"}\n{\"operation\":\"generate\",\"prompt\":\"fast\",\"out\":\"fast.png\"}\n{\"operation\":\"generate\",\"prompt\":\"third\",\"out\":\"third.png\"}\n")
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--base-url", server.URL, "--max-attempts", "1", "--concurrency", "2"}, &output); err != nil {
+		t.Fatalf("runBatch returned an error: %v", err)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if len(summary.Jobs) != 3 || summary.Jobs[0].Index != 1 || summary.Jobs[1].Index != 2 || summary.Jobs[2].Index != 3 {
+		t.Fatalf("summary jobs are not in input order: %+v", summary.Jobs)
+	}
+	mu.Lock()
+	fast, third, slow := starts["fast"], starts["third"], starts["slow"]
+	mu.Unlock()
+	if third.IsZero() || fast.IsZero() || slow.IsZero() || !third.Before(slow.Add(100*time.Millisecond)) {
+		t.Fatalf("third job did not start as soon as a worker freed: starts=%v", starts)
+	}
+}
+
+func TestRunBatchContinuesAfterFailureAndFailFastStopsScheduling(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if payload.Prompt == "bad" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	t.Setenv("IMAGE_API_KEY", "test-key")
+	t.Setenv("IMAGE_API_MAX_ATTEMPTS", "1")
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"bad\",\"out\":\"bad.png\"}\n{\"operation\":\"generate\",\"prompt\":\"good\",\"out\":\"good.png\"}\n")
+	var output bytes.Buffer
+	err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--base-url", server.URL, "--max-attempts", "1", "--concurrency", "1"}, &output)
+	if err == nil {
+		t.Fatal("runBatch succeeded despite a failed job")
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Jobs[0].OK || !summary.Jobs[1].OK || len(summary.Jobs[1].Outputs) != 1 {
+		t.Fatalf("default failure handling summary = %+v", summary.Jobs)
+	}
+	output.Reset()
+	mu.Lock()
+	requests = 0
+	mu.Unlock()
+	err = runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--base-url", server.URL, "--max-attempts", "1", "--concurrency", "1", "--fail-fast"}, &output)
+	if err == nil {
+		t.Fatal("fail-fast batch succeeded despite a failed job")
+	}
+	summary = decodeBatchSummary(t, &output)
+	mu.Lock()
+	gotRequests := requests
+	mu.Unlock()
+	if gotRequests != 1 || summary.Jobs[1].Error == "" {
+		t.Fatalf("fail-fast scheduled too much or omitted skipped error: requests=%d jobs=%+v", gotRequests, summary.Jobs)
 	}
 }

@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -56,11 +55,12 @@ type apiResponse struct {
 }
 
 type batchJob struct {
-	Prompt  string `json:"prompt"`
-	Model   string `json:"model,omitempty"`
-	Size    string `json:"size,omitempty"`
-	Quality string `json:"quality,omitempty"`
-	Out     string `json:"out,omitempty"`
+	Operation string `json:"operation"`
+	Prompt    string `json:"prompt"`
+	Model     string `json:"model,omitempty"`
+	Size      string `json:"size,omitempty"`
+	Quality   string `json:"quality,omitempty"`
+	Out       string `json:"out"`
 }
 
 func endpoint(base, operation string) string {
@@ -533,105 +533,235 @@ func runEdit(argv []string, output io.Writer) error {
 	return writeJSON(output, result)
 }
 
-func runBatch(argv []string, output io.Writer) error {
-	fs := flag.NewFlagSet("generate-batch", flag.ContinueOnError)
-	var input string
-	concurrency, err := batchConcurrencyFromEnv()
-	if err != nil {
-		return err
+type batchResult struct {
+	Index   int            `json:"index"`
+	OK      bool           `json:"ok"`
+	Outputs []string       `json:"outputs,omitempty"`
+	Data    map[string]any `json:"data,omitempty"`
+	Error   string         `json:"error,omitempty"`
+}
+
+func batchOutputPath(job batchJob, args commonArgs) (string, error) {
+	out := strings.TrimSpace(job.Out)
+	if out == "" {
+		return "", errors.New("out must not be empty")
 	}
+	if !filepath.IsAbs(out) {
+		out = filepath.Join(args.outDir, out)
+	}
+	paths := outputPaths(out, args.outDir, strings.TrimSpace(job.Prompt))
+	if len(paths) != 1 {
+		return "", errors.New("batch jobs must produce exactly one output")
+	}
+	return filepath.Clean(paths[0]), nil
+}
+
+func validateBatchOutput(path string, force bool) error {
+	if _, err := filepath.Abs(path); err != nil {
+		return fmt.Errorf("invalid output path %q: %w", path, err)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("output path is a directory: %s", path)
+		}
+		if !force {
+			return fmt.Errorf("refusing to overwrite existing file: %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("could not inspect output path %s: %w", path, err)
+	}
+	parent := filepath.Dir(path)
+	if info, err := os.Stat(parent); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("output parent is not a directory: %s", parent)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("could not inspect output directory %s: %w", parent, err)
+	}
+	return nil
+}
+
+func batchConcurrencyFlag(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "concurrency" {
+			set = true
+		}
+	})
+	return set
+}
+
+func runBatch(argv []string, output io.Writer) error {
+	fs := flag.NewFlagSet("batch", flag.ContinueOnError)
+	var input string
+	var concurrency int
 	var failFast bool
 	fs.StringVar(&input, "input", "", "JSONL input path")
-	fs.IntVar(&concurrency, "concurrency", concurrency, "parallel jobs")
+	fs.IntVar(&concurrency, "concurrency", defaultBatchConcurrency, "parallel jobs")
 	fs.BoolVar(&failFast, "fail-fast", false, "stop scheduling after a failure")
 	var args commonArgs
 	if err := parseCommon(fs, argv, &args); err != nil {
 		return err
 	}
+	if !batchConcurrencyFlag(fs) {
+		var err error
+		concurrency, err = batchConcurrencyFromEnv()
+		if err != nil {
+			return err
+		}
+	}
 	if input == "" || concurrency < 1 {
 		return errors.New("--input is required and --concurrency must be at least 1")
 	}
+
 	file, err := os.Open(input)
 	if err != nil {
 		return fmt.Errorf("could not read batch input: %w", err)
 	}
 	defer file.Close()
+
 	var jobs []batchJob
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
 		if strings.TrimSpace(scanner.Text()) == "" {
 			continue
 		}
 		var job batchJob
-		if err := json.Unmarshal(scanner.Bytes(), &job); err != nil || strings.TrimSpace(job.Prompt) == "" {
-			return errors.New("each JSONL line must contain a non-empty prompt")
+		if err := json.Unmarshal(scanner.Bytes(), &job); err != nil {
+			return fmt.Errorf("batch line %d is invalid JSON: %w", lineNumber, err)
+		}
+		operation := strings.TrimSpace(job.Operation)
+		if operation == "" {
+			return fmt.Errorf("batch line %d must declare operation: generate", lineNumber)
+		}
+		if operation != "generate" {
+			return fmt.Errorf("batch line %d has unknown operation %q; only generate is supported", lineNumber, operation)
+		}
+		if strings.TrimSpace(job.Prompt) == "" {
+			return fmt.Errorf("batch line %d prompt must not be empty", lineNumber)
+		}
+		if strings.TrimSpace(job.Out) == "" {
+			return fmt.Errorf("batch line %d out must not be empty", lineNumber)
 		}
 		jobs = append(jobs, job)
 	}
-	if err := scanner.Err(); err != nil || len(jobs) == 0 {
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("could not read batch input: %w", err)
+	}
+	if len(jobs) == 0 {
 		return errors.New("batch input contains no valid jobs")
 	}
-	type result struct {
-		Index int            `json:"index"`
-		OK    bool           `json:"ok"`
-		Data  map[string]any `json:"data,omitempty"`
-		Error string         `json:"error,omitempty"`
+
+	// Resolve and validate every output before starting any worker. This also
+	// catches aliases such as ./a.png and nested/../a.png as duplicates.
+	resolved := make([]string, len(jobs))
+	seen := make(map[string]int, len(jobs))
+	for i, job := range jobs {
+		jobArgs := args
+		if strings.TrimSpace(job.Model) != "" {
+			jobArgs.model = strings.TrimSpace(job.Model)
+		}
+		if strings.TrimSpace(job.Size) != "" {
+			jobArgs.size = strings.TrimSpace(job.Size)
+		}
+		if strings.TrimSpace(job.Quality) != "" {
+			jobArgs.quality = strings.TrimSpace(job.Quality)
+		}
+		if err := validateCommon(jobArgs); err != nil {
+			return fmt.Errorf("batch line %d is invalid: %w", i+1, err)
+		}
+		path, err := batchOutputPath(job, args)
+		if err != nil {
+			return fmt.Errorf("batch line %d: %w", i+1, err)
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("batch line %d has invalid output path: %w", i+1, err)
+		}
+		absolute = filepath.Clean(absolute)
+		if previous, exists := seen[absolute]; exists {
+			return fmt.Errorf("batch lines %d and %d resolve to the same output: %s", previous, i+1, absolute)
+		}
+		seen[absolute] = i + 1
+		if err := validateBatchOutput(path, args.force); err != nil {
+			return fmt.Errorf("batch line %d: %w", i+1, err)
+		}
+		resolved[i] = path
 	}
-	results := make([]result, len(jobs))
-	queue := make(chan int)
-	var wg sync.WaitGroup
-	var failed bool
-	var mu sync.Mutex
-	for range concurrency {
-		wg.Add(1)
+
+	results := make([]batchResult, len(jobs))
+	done := make(chan struct {
+		index int
+		data  map[string]any
+		err   error
+	})
+	next, active := 0, 0
+	launch := func(index int) {
+		active++
 		go func() {
-			defer wg.Done()
-			for index := range queue {
-				job := jobs[index]
-				jobArgs := args
-				if job.Model != "" {
-					jobArgs.model = job.Model
-				}
-				if job.Size != "" {
-					jobArgs.size = job.Size
-				}
-				if job.Quality != "" {
-					jobArgs.quality = job.Quality
-				}
-				data, err := generate(strings.TrimSpace(job.Prompt), job.Out, jobArgs)
-				results[index] = result{Index: index + 1, OK: err == nil, Data: data}
-				if err != nil {
-					results[index].Error = err.Error()
-					mu.Lock()
-					failed = true
-					mu.Unlock()
-				}
+			job := jobs[index]
+			jobArgs := args
+			if strings.TrimSpace(job.Model) != "" {
+				jobArgs.model = strings.TrimSpace(job.Model)
 			}
+			if strings.TrimSpace(job.Size) != "" {
+				jobArgs.size = strings.TrimSpace(job.Size)
+			}
+			if strings.TrimSpace(job.Quality) != "" {
+				jobArgs.quality = strings.TrimSpace(job.Quality)
+			}
+			data, err := generate(strings.TrimSpace(job.Prompt), resolved[index], jobArgs)
+			done <- struct {
+				index int
+				data  map[string]any
+				err   error
+			}{index: index, data: data, err: err}
 		}()
 	}
-	for index := range jobs {
-		mu.Lock()
-		stop := failFast && failed
-		mu.Unlock()
-		if stop {
-			break
-		}
-		queue <- index
+	for active < concurrency && next < len(jobs) {
+		launch(next)
+		next++
 	}
-	close(queue)
-	wg.Wait()
+	failed := false
+	for active > 0 {
+		finished := <-done
+		active--
+		result := batchResult{Index: finished.index + 1, OK: finished.err == nil, Data: finished.data}
+		if finished.err != nil {
+			result.Error = finished.err.Error()
+			failed = true
+		} else if outputs, ok := finished.data["outputs"].([]string); ok {
+			result.Outputs = outputs
+		}
+		results[finished.index] = result
+		if (!failFast || !failed) && next < len(jobs) {
+			launch(next)
+			next++
+		}
+	}
+	if failFast && failed {
+		for index := next; index < len(jobs); index++ {
+			results[index] = batchResult{Index: index + 1, Error: "not started because fail-fast was triggered"}
+		}
+	}
+
 	succeeded, failures := 0, 0
 	for _, item := range results {
-		if item.Index == 0 {
-			continue
-		}
 		if item.OK {
 			succeeded++
 		} else {
 			failures++
 		}
 	}
-	if err := writeJSON(output, map[string]any{"concurrency": concurrency, "jobs": results, "succeeded": succeeded, "failed": failures}); err != nil {
+	if err := writeJSON(output, map[string]any{
+		"concurrency": concurrency,
+		"jobs":        results,
+		"succeeded":   succeeded,
+		"failed":      failures,
+	}); err != nil {
 		return err
 	}
 	if failures > 0 {
@@ -641,7 +771,7 @@ func runBatch(argv []string, output io.Writer) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: img-gen <generate|generate-batch|edit> [options]")
+	fmt.Fprintln(os.Stderr, "Usage: img-gen <generate|edit|batch> [options]")
 }
 
 func main() {
@@ -653,10 +783,10 @@ func main() {
 	switch os.Args[1] {
 	case "generate":
 		err = runGenerate(os.Args[2:], os.Stdout)
-	case "generate-batch":
-		err = runBatch(os.Args[2:], os.Stdout)
 	case "edit":
 		err = runEdit(os.Args[2:], os.Stdout)
+	case "batch":
+		err = runBatch(os.Args[2:], os.Stdout)
 	case "--help", "-h", "help":
 		usage()
 		return

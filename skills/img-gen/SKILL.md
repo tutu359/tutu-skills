@@ -9,7 +9,7 @@ Generate and edit images with the bundled native macOS and Windows CLI. No Pytho
 
 ## Fast path
 
-For every normal `generate`, `edit`, or `generate-batch` request:
+For every normal `generate`, `edit`, or `batch` request:
 
 1. Use only the prompt, attachments, and settings the user explicitly provides.
 2. Select the launcher from the current operating system, then run it directly:
@@ -26,7 +26,7 @@ In the examples below, replace `<img-gen>` with the launcher for the current ope
 
 ## Choose the operation
 
-- Use `generate` for one prompt and one image. Use `generate-batch` for distinct prompts or assets.
+- Use `generate` for one prompt and one image. Use `batch` for distinct prompts or assets. `generate-batch` is no longer a supported command.
 - Use `edit` to change or combine existing images. Inspect each input first and preserve the originals.
 - Each `generate` or `edit` task requests and saves exactly one image; do not pass a quantity option.
 
@@ -71,19 +71,19 @@ Repeat `--image` for multiple inputs. Use `--mask` when a compatible PNG mask is
 For ordinary batches, write JSONL directly without first reading another file. Each non-empty line is one job:
 
 ```jsonl
-{"prompt":"A blue ceramic mug on white","out":"mug.png"}
-{"prompt":"A red paper kite in a clear sky","size":"1536x1024","quality":"low","out":"kite.png"}
+{"operation":"generate","prompt":"A blue ceramic mug on white","out":"mug.png"}
+{"operation":"generate","prompt":"A red paper kite in a clear sky","size":"1536x1024","quality":"low","out":"kite.png"}
 ```
 
 Then run:
 
 ```bash
-"<img-gen>" generate-batch \
+"<img-gen>" batch \
   --input "tmp/imagegen/jobs.jsonl" \
   --out-dir "output/imagegen"
 ```
 
-Supported job fields are `prompt`, `out`, `size`, `quality`, and `model`; each job requests one image. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
+Supported job fields are `operation`, `prompt`, `out`, `size`, `quality`, and `model`. Every job must set `operation` to `generate`, and each job requests one image. Relative `out` paths are resolved under `--out-dir`; absolute paths are unchanged. All jobs are preflighted before any network request, including output conflicts and duplicate resolved paths. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
 
 ## Sizes
 
