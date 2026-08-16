@@ -232,6 +232,55 @@ func TestRunBatchReturnsOutputErrorAfterSavingImage(t *testing.T) {
 	}
 }
 
+func TestRunEditRejectsUnexpectedResponseCardinality(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	for _, count := range []int{0, 2} {
+		t.Run(fmt.Sprintf("%d images", count), func(t *testing.T) {
+			input := filepath.Join(t.TempDir(), "input.png")
+			if err := os.WriteFile(input, []byte("input image"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if count == 0 {
+					fmt.Fprint(w, `{"data":[]}`)
+					return
+				}
+				fmt.Fprintf(w, `{"data":[{"b64_json":%q},{"b64_json":%q}]}`, png, png)
+			}))
+			defer server.Close()
+
+			t.Setenv("IMAGE_API_KEY", "test-key")
+			t.Setenv("IMAGE_API_MAX_ATTEMPTS", "1")
+			outDir := t.TempDir()
+			var output bytes.Buffer
+			err := runEdit([]string{
+				"--image", input,
+				"--prompt", "edit the image",
+				"--base-url", server.URL,
+				"--out-dir", outDir,
+				"--max-attempts", "1",
+			}, &output)
+			if err == nil {
+				t.Fatalf("runEdit succeeded for %d returned images", count)
+			}
+			if count == 0 && !strings.Contains(err.Error(), "no image data") {
+				t.Fatalf("runEdit error = %q, want no-image failure", err)
+			}
+			if count == 2 && !strings.Contains(err.Error(), "returned 2 image(s), expected 1") {
+				t.Fatalf("runEdit error = %q, want multiple-image failure", err)
+			}
+			entries, err := os.ReadDir(outDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("saved %d output files after cardinality failure, want 0", len(entries))
+			}
+		})
+	}
+}
+
 func TestSingleImageCommandsRejectUnexpectedResponseCardinality(t *testing.T) {
 	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	for _, count := range []int{0, 2} {
