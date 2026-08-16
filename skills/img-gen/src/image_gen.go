@@ -541,6 +541,19 @@ type batchResult struct {
 	Error   string         `json:"error,omitempty"`
 }
 
+func batchJobArgs(job batchJob, args commonArgs) commonArgs {
+	if strings.TrimSpace(job.Model) != "" {
+		args.model = strings.TrimSpace(job.Model)
+	}
+	if strings.TrimSpace(job.Size) != "" {
+		args.size = strings.TrimSpace(job.Size)
+	}
+	if strings.TrimSpace(job.Quality) != "" {
+		args.quality = strings.TrimSpace(job.Quality)
+	}
+	return args
+}
+
 func batchOutputPath(job batchJob, args commonArgs) (string, error) {
 	out := strings.TrimSpace(job.Out)
 	if out == "" {
@@ -660,16 +673,7 @@ func runBatch(argv []string, output io.Writer) error {
 	resolved := make([]string, len(jobs))
 	seen := make(map[string]int, len(jobs))
 	for i, job := range jobs {
-		jobArgs := args
-		if strings.TrimSpace(job.Model) != "" {
-			jobArgs.model = strings.TrimSpace(job.Model)
-		}
-		if strings.TrimSpace(job.Size) != "" {
-			jobArgs.size = strings.TrimSpace(job.Size)
-		}
-		if strings.TrimSpace(job.Quality) != "" {
-			jobArgs.quality = strings.TrimSpace(job.Quality)
-		}
+		jobArgs := batchJobArgs(job, args)
 		if err := validateCommon(jobArgs); err != nil {
 			return fmt.Errorf("batch line %d is invalid: %w", i+1, err)
 		}
@@ -703,16 +707,7 @@ func runBatch(argv []string, output io.Writer) error {
 		active++
 		go func() {
 			job := jobs[index]
-			jobArgs := args
-			if strings.TrimSpace(job.Model) != "" {
-				jobArgs.model = strings.TrimSpace(job.Model)
-			}
-			if strings.TrimSpace(job.Size) != "" {
-				jobArgs.size = strings.TrimSpace(job.Size)
-			}
-			if strings.TrimSpace(job.Quality) != "" {
-				jobArgs.quality = strings.TrimSpace(job.Quality)
-			}
+			jobArgs := batchJobArgs(job, args)
 			data, err := generate(strings.TrimSpace(job.Prompt), resolved[index], jobArgs)
 			done <- struct {
 				index int
