@@ -26,9 +26,9 @@ In the examples below, replace `<img-gen>` with the launcher for the current ope
 
 ## Choose the operation
 
-- Use `generate` for one prompt. Use `--n` only for variants of that same prompt.
+- Use `generate` for one prompt and one image. Use `generate-batch` for distinct prompts or assets.
 - Use `edit` to change or combine existing images. Inspect each input first and preserve the originals.
-- Use `generate-batch` for distinct prompts or assets.
+- Each `generate` or `edit` task requests and saves exactly one image; do not pass a quantity option.
 
 ## Prompts
 
@@ -72,7 +72,7 @@ For ordinary batches, write JSONL directly without first reading another file. E
 
 ```jsonl
 {"prompt":"A blue ceramic mug on white","out":"mug.png"}
-{"prompt":"A red paper kite in a clear sky","size":"1536x1024","quality":"low","n":2,"out":"kite.png"}
+{"prompt":"A red paper kite in a clear sky","size":"1536x1024","quality":"low","out":"kite.png"}
 ```
 
 Then run:
@@ -83,7 +83,7 @@ Then run:
   --out-dir "output/imagegen"
 ```
 
-Supported job fields are `prompt`, `out`, `size`, `quality`, `n`, and `model`. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
+Supported job fields are `prompt`, `out`, `size`, `quality`, and `model`; each job requests one image. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
 
 ## Sizes
 

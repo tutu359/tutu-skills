@@ -41,7 +41,6 @@ type commonArgs struct {
 	model       string
 	size        string
 	quality     string
-	n           int
 	outDir      string
 	force       bool
 	dryRun      bool
@@ -61,7 +60,6 @@ type batchJob struct {
 	Model   string `json:"model,omitempty"`
 	Size    string `json:"size,omitempty"`
 	Quality string `json:"quality,omitempty"`
-	N       int    `json:"n,omitempty"`
 	Out     string `json:"out,omitempty"`
 }
 
@@ -76,9 +74,6 @@ func endpoint(base, operation string) string {
 func validateCommon(args commonArgs) error {
 	if strings.TrimSpace(args.baseURL) == "" {
 		return errors.New("IMAGE_API_BASE_URL is not set; set it locally or pass --base-url, then retry")
-	}
-	if args.n < 1 || args.n > 10 {
-		return errors.New("n must be from 1 to 10")
 	}
 	if args.maxAttempts < 1 {
 		return errors.New("--max-attempts must be at least 1")
@@ -121,7 +116,7 @@ func promptValue(prompt, promptFile string) (string, error) {
 	return prompt, nil
 }
 
-func outputPaths(out, outDir, prompt string, n int) []string {
+func outputPaths(out, outDir, prompt string) []string {
 	if out == "" {
 		sum := sha256.Sum256([]byte(prompt))
 		out = "image-" + hex.EncodeToString(sum[:6]) + ".png"
@@ -131,18 +126,9 @@ func outputPaths(out, outDir, prompt string, n int) []string {
 	}
 	ext := filepath.Ext(out)
 	if ext == "" {
-		ext = ".png"
-		out += ext
+		out += ".png"
 	}
-	if n == 1 {
-		return []string{out}
-	}
-	base := strings.TrimSuffix(out, ext)
-	paths := make([]string, n)
-	for i := range paths {
-		paths[i] = fmt.Sprintf("%s-%d%s", base, i+1, ext)
-	}
-	return paths
+	return []string{out}
 }
 
 func checkOutputs(paths []string, force bool) error {
@@ -332,12 +318,12 @@ func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 	if err := validateCommon(args); err != nil {
 		return nil, err
 	}
-	paths := outputPaths(out, args.outDir, prompt, args.n)
+	paths := outputPaths(out, args.outDir, prompt)
 	if err := checkOutputs(paths, args.force); err != nil {
 		return nil, err
 	}
 	ep := endpoint(args.baseURL, "generations")
-	payload := map[string]any{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": args.n}
+	payload := map[string]any{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": 1}
 	if args.dryRun {
 		return map[string]any{"dry_run": true, "endpoint": ep, "payload": payload, "outputs": paths}, nil
 	}
@@ -381,12 +367,12 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 			return nil, fmt.Errorf("input file not found: %s", path)
 		}
 	}
-	paths := outputPaths(out, args.outDir, prompt, args.n)
+	paths := outputPaths(out, args.outDir, prompt)
 	if err := checkOutputs(paths, args.force); err != nil {
 		return nil, err
 	}
 	ep := endpoint(args.baseURL, "edits")
-	fields := map[string]string{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": strconv.Itoa(args.n)}
+	fields := map[string]string{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": "1"}
 	if args.dryRun {
 		return map[string]any{"dry_run": true, "endpoint": ep, "fields": fields, "images": imagePaths, "mask": mask, "outputs": paths}, nil
 	}
@@ -479,7 +465,6 @@ func parseCommon(fs *flag.FlagSet, argv []string, args *commonArgs) error {
 	fs.StringVar(&args.model, "model", model, "image model")
 	fs.StringVar(&args.size, "size", defaultSize, "auto or WIDTHxHEIGHT")
 	fs.StringVar(&args.quality, "quality", defaultQuality, "low, medium, high, or auto")
-	fs.IntVar(&args.n, "n", 1, "number of variants (1-10)")
 	fs.StringVar(&args.outDir, "out-dir", defaultOutDir, "default output directory")
 	fs.BoolVar(&args.force, "force", false, "overwrite existing outputs")
 	fs.BoolVar(&args.dryRun, "dry-run", false, "validate without network access")
@@ -612,9 +597,6 @@ func runBatch(argv []string, output io.Writer) error {
 				}
 				if job.Quality != "" {
 					jobArgs.quality = job.Quality
-				}
-				if job.N != 0 {
-					jobArgs.n = job.N
 				}
 				data, err := generate(strings.TrimSpace(job.Prompt), job.Out, jobArgs)
 				results[index] = result{Index: index + 1, OK: err == nil, Data: data}
