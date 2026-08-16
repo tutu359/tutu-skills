@@ -83,7 +83,7 @@ Then run:
   --out-dir "output/imagegen"
 ```
 
-Supported job fields are `operation`, `prompt`, `out`, `size`, `quality`, and `model`. Every job must set `operation` to `generate`, and each job requests one image. Relative `out` paths are resolved under `--out-dir`; absolute paths are unchanged. All jobs are preflighted before any network request, including output conflicts and duplicate resolved paths. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
+Supported job fields are `operation`, `prompt`, `out`, `image`, `mask`, `size`, `quality`, and `model`. Every job must explicitly set `operation` to `generate` or `edit`. Generate jobs must not include `image` or `mask`; edit jobs require an `image` array with at least one path and may include one `mask`. Images are uploaded in the array's order, and prompts are sent unchanged. Relative image and mask paths are resolved from the batch file directory; relative `out` paths are resolved under `--out-dir`. All jobs are preflighted before any network request, including input files, output conflicts, and duplicate resolved paths. Use unique output names. Read [references/batch-format.md](references/batch-format.md) only when resolving an unfamiliar batch-format question or error.
 
 ## Sizes
 

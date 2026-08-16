@@ -55,8 +55,12 @@ type apiResponse struct {
 }
 
 type batchJob struct {
-	Operation string `json:"operation"`
-	Prompt    string `json:"prompt"`
+	Operation string   `json:"operation"`
+	Prompt    string   `json:"prompt"`
+	Images    []string `json:"image,omitempty"`
+	Mask      string   `json:"mask,omitempty"`
+	imageSet  bool
+	maskSet   bool
 	Model     string `json:"model,omitempty"`
 	Size      string `json:"size,omitempty"`
 	Quality   string `json:"quality,omitempty"`
@@ -534,11 +538,12 @@ func runEdit(argv []string, output io.Writer) error {
 }
 
 type batchResult struct {
-	Index   int            `json:"index"`
-	OK      bool           `json:"ok"`
-	Outputs []string       `json:"outputs,omitempty"`
-	Data    map[string]any `json:"data,omitempty"`
-	Error   string         `json:"error,omitempty"`
+	Index     int            `json:"index"`
+	Operation string         `json:"operation"`
+	OK        bool           `json:"ok"`
+	Outputs   []string       `json:"outputs,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	Error     string         `json:"error,omitempty"`
 }
 
 func batchJobArgs(job batchJob, args commonArgs) commonArgs {
@@ -552,6 +557,28 @@ func batchJobArgs(job batchJob, args commonArgs) commonArgs {
 		args.quality = strings.TrimSpace(job.Quality)
 	}
 	return args
+}
+
+func batchInputPath(raw, batchDir string) (string, error) {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return "", errors.New("input path must not be empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(batchDir, path)
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("input file not found: %s", path)
+		}
+		return "", fmt.Errorf("could not inspect input file %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("input path is a directory: %s", path)
+	}
+	return path, nil
 }
 
 func batchOutputPath(job batchJob, args commonArgs) (string, error) {
@@ -646,18 +673,40 @@ func runBatch(argv []string, output io.Writer) error {
 		if err := json.Unmarshal(scanner.Bytes(), &job); err != nil {
 			return fmt.Errorf("batch line %d is invalid JSON: %w", lineNumber, err)
 		}
-		operation := strings.TrimSpace(job.Operation)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(scanner.Bytes(), &fields); err != nil {
+			return fmt.Errorf("batch line %d is invalid JSON: %w", lineNumber, err)
+		}
+		_, job.imageSet = fields["image"]
+		_, job.maskSet = fields["mask"]
+		operation := job.Operation
 		if operation == "" {
-			return fmt.Errorf("batch line %d must declare operation: generate", lineNumber)
+			return fmt.Errorf("batch line %d must declare operation as generate or edit", lineNumber)
 		}
-		if operation != "generate" {
-			return fmt.Errorf("batch line %d has unknown operation %q; only generate is supported", lineNumber, operation)
+		if operation != "generate" && operation != "edit" {
+			return fmt.Errorf("batch line %d has unknown operation %q; expected generate or edit", lineNumber, operation)
 		}
+		job.Operation = operation
 		if strings.TrimSpace(job.Prompt) == "" {
 			return fmt.Errorf("batch line %d prompt must not be empty", lineNumber)
 		}
 		if strings.TrimSpace(job.Out) == "" {
 			return fmt.Errorf("batch line %d out must not be empty", lineNumber)
+		}
+		if operation == "generate" {
+			if job.imageSet {
+				return fmt.Errorf("batch line %d generate jobs must not include image", lineNumber)
+			}
+			if job.maskSet {
+				return fmt.Errorf("batch line %d generate jobs must not include mask", lineNumber)
+			}
+		} else {
+			if len(job.Images) == 0 {
+				return fmt.Errorf("batch line %d edit jobs must provide at least one image", lineNumber)
+			}
+			if job.maskSet && strings.TrimSpace(job.Mask) == "" {
+				return fmt.Errorf("batch line %d edit mask must not be empty", lineNumber)
+			}
 		}
 		jobs = append(jobs, job)
 	}
@@ -668,16 +717,38 @@ func runBatch(argv []string, output io.Writer) error {
 		return errors.New("batch input contains no valid jobs")
 	}
 
-	// Resolve and validate every output before starting any worker. This also
-	// catches aliases such as ./a.png and nested/../a.png as duplicates.
+	// Resolve and validate every input and output before starting any worker.
+	// This keeps malformed jobs and missing files from causing partial network work.
+	batchPath, err := filepath.Abs(input)
+	if err != nil {
+		return fmt.Errorf("could not resolve batch input path: %w", err)
+	}
+	batchDir := filepath.Dir(batchPath)
 	resolved := make([]string, len(jobs))
 	seen := make(map[string]int, len(jobs))
-	for i, job := range jobs {
-		jobArgs := batchJobArgs(job, args)
+	for i := range jobs {
+		job := &jobs[i]
+		jobArgs := batchJobArgs(*job, args)
 		if err := validateCommon(jobArgs); err != nil {
 			return fmt.Errorf("batch line %d is invalid: %w", i+1, err)
 		}
-		path, err := batchOutputPath(job, args)
+		if job.Operation == "edit" {
+			for imageIndex, image := range job.Images {
+				resolvedImage, err := batchInputPath(image, batchDir)
+				if err != nil {
+					return fmt.Errorf("batch line %d image %d: %w", i+1, imageIndex+1, err)
+				}
+				job.Images[imageIndex] = resolvedImage
+			}
+			if strings.TrimSpace(job.Mask) != "" {
+				resolvedMask, err := batchInputPath(job.Mask, batchDir)
+				if err != nil {
+					return fmt.Errorf("batch line %d mask: %w", i+1, err)
+				}
+				job.Mask = resolvedMask
+			}
+		}
+		path, err := batchOutputPath(*job, args)
 		if err != nil {
 			return fmt.Errorf("batch line %d: %w", i+1, err)
 		}
@@ -708,7 +779,13 @@ func runBatch(argv []string, output io.Writer) error {
 		go func() {
 			job := jobs[index]
 			jobArgs := batchJobArgs(job, args)
-			data, err := generate(strings.TrimSpace(job.Prompt), resolved[index], jobArgs)
+			var data map[string]any
+			var err error
+			if job.Operation == "edit" {
+				data, err = edit(job.Prompt, job.Images, job.Mask, resolved[index], jobArgs)
+			} else {
+				data, err = generate(job.Prompt, resolved[index], jobArgs)
+			}
 			done <- struct {
 				index int
 				data  map[string]any
@@ -724,7 +801,7 @@ func runBatch(argv []string, output io.Writer) error {
 	for active > 0 {
 		finished := <-done
 		active--
-		result := batchResult{Index: finished.index + 1, OK: finished.err == nil, Data: finished.data}
+		result := batchResult{Index: finished.index + 1, Operation: jobs[finished.index].Operation, OK: finished.err == nil, Data: finished.data}
 		if finished.err != nil {
 			result.Error = finished.err.Error()
 			failed = true
@@ -739,7 +816,7 @@ func runBatch(argv []string, output io.Writer) error {
 	}
 	if failFast && failed {
 		for index := next; index < len(jobs); index++ {
-			results[index] = batchResult{Index: index + 1, Error: "not started because fail-fast was triggered"}
+			results[index] = batchResult{Index: index + 1, Operation: jobs[index].Operation, Error: "not started because fail-fast was triggered"}
 		}
 	}
 
