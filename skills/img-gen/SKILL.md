@@ -48,7 +48,7 @@ The prompts are intentionally identical. The Skill guarantees intentional task-p
 
 ### Authorized variations only
 
-Create a derived prompt only for a dimension the user explicitly authorizes. Preserve every other dimension exactly, including subject, action, composition, camera treatment, lighting, palette, text, constraints, and avoid-items. A request such as “make a few variations” authorizes variation, but does not authorize silently changing every visual dimension.
+Create a derived prompt only for a dimension the user explicitly authorizes. Preserve every other dimension exactly, including subject, action, composition, camera treatment, lighting, palette, text, constraints, and avoid-items. A request such as “make a few variations” is not enough by itself: the user must authorize a dimension such as style, pose, or scene. Once a dimension is authorized, choose concrete values when the user leaves them open, but do not silently change every visual dimension.
 
 Supported variation dimensions can be combined when the user authorizes them:
 

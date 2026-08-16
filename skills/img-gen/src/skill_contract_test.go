@@ -37,6 +37,8 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"repeat the prompt **exactly** in every `generate` job",
 		"Make only the `out` values unique",
 		"Create a derived prompt only for a dimension the user explicitly authorizes",
+		"the user must authorize a dimension such as style, pose, or scene",
+		"Once a dimension is authorized, choose concrete values when the user leaves them open",
 		"When an authorized dimension has no concrete value, choose suitable values and generate directly",
 		"Every derived prompt must be self-contained",
 		"Performance or rendering variants",
