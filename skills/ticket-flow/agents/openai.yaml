@@ -1,0 +1,7 @@
+interface:
+  display_name: "Ticket Flow"
+  short_description: "依赖驱动串行派发 Subagent 实现 Ticket"
+  default_prompt: "使用 $ticket-flow 按已确认顺序自动串行派发 Subagent 实现全部 Ticket；每个 Subagent 先读取 implement 参考文件，完成后提交并返回报告。"
+
+policy:
+  allow_implicit_invocation: false

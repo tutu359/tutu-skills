@@ -1,102 +1,220 @@
 ---
 name: ticket-flow
-description: "按依赖顺序用独立 Subagent 实现 Tickets，并保留 worktree 供审阅。"
+description: "按已确认顺序，使用独立 Subagent 串行实现 to-tickets 产出的 Ticket；每个后续 Ticket 从前一个 Ticket 的完成 commit 创建独立 worktree，并在实现、验证、代码审查后提交。"
 disable-model-invocation: true
 ---
 
-# Ticket Flow
+# 使用 Subagent 实现 Ticket
 
-把本次提供的 Ticket 作为一条**串行执行链**处理。这个 Skill 由用户手动启动一次；启动后，当前代理只做编排，代码由独立 Subagent 实现。
+按照下面的顺序驱动串行 Ticket 实现协议执行。
 
-## 目标
+## 执行模式
 
-- 每个 Ticket 使用一个独立的 Subagent。
-- 同一时间只推进一个 Ticket。
-- Ticket 编号始终使用外部系统的真实标识符；编号不是执行序号。
-- 执行顺序由显式依赖关系和用户给出的顺序决定，不由编号大小决定。
-- 每个 Ticket 在独立 worktree 和分支中完成。
-- 后续 Ticket 从其依赖 Ticket 的完成 commit 继续；当前分支始终不变。
-- 全部完成后保留 worktree、分支和 commit，停止并等待用户审阅。
+默认使用**自动串行模式**：按照已确认顺序连续完成所有指定 Ticket。一个 Ticket 成功后，当前代理接收、核验并记录完成报告，不停下来等待用户确认，直接创建并启动下一个 Ticket。
 
-## 启动前检查
+如果用户在开始时明确声明“自动执行所有 Ticket”或同等意思，必须采用自动串行模式。除非发生失败、阻塞、依赖歧义、检查未通过或需要用户作出决策，否则不得中途提问或暂停。
 
-在产生任何代码变更或外部写操作前，完成以下检查：
+只有用户明确要求“每个 Ticket 完成后暂停审阅”时，才切换为逐 Ticket 审阅模式；该模式下才需要在每个完成报告后等待用户指令。
 
-1. 读取本文件同目录下的 `SUBAGENT.md` 和 `IMPLEMENT.md`。前者是每个实现 Subagent 的执行契约，后者是必须原样遵循的实现规范。
-2. 确认当前目录是目标 Git 仓库，并记录当前分支、HEAD commit 和工作区状态。
-3. 当前工作区有未提交变更、当前分支不是预期基线、Ticket 内容不完整、依赖关系有歧义、依赖图有环，或无法安全创建独立 Git worktree 时，先向用户一次性说明问题并暂停。
-4. 读取本次范围内的 Ticket 和父级 PRD。父级 PRD 只读，用于上下文和依赖，不列入待实现 Ticket。
-5. 验证执行链：确认当前唯一可开始的 Ticket，或确认用户给出的 Ticket 顺序。不要根据编号自行排序，也不要补齐缺失编号。
-6. 向用户简要列出将要执行的顺序、每个 Ticket 的基线来源和预计分支命名。信息明确时直接开始，不为正常的命名或实现细节重复询问。
+自动串行模式包含有限 API 重试：调用失败时，由直接管理该调用的上一级代理负责间隔重试，最多 5 次。
 
-## 调度流程
+## 一、执行主体
 
-对每一个 Ticket 严格重复以下流程，完成当前 Ticket 后才进入下一个：
+1. 必须使用 Subagent 实现 Ticket。
+2. 每一个 Ticket 必须由一个独立的 Subagent 处理。
+3. 当前代理只负责：
+   - 解析 Ticket 及其依赖关系；
+   - 按顺序创建 worktree；
+   - 派发和监督 Subagent；
+   - 验证 Subagent 的完成报告、commit 和检查结果；
+   - 汇总执行结果。
+4. 当前代理不得直接修改代码，也不得代替 Subagent 实现 Ticket。
+5. 不使用 Teammate，也不要并行执行多个 Ticket。
 
-1. 计算基线 commit：
-   - 无依赖的 Ticket 从启动时记录的基线 HEAD 创建。
-   - 只有一个前置依赖的 Ticket 从该依赖的完成 commit 创建。
-   - 有多个前置依赖且不能自然落在一个已有 commit 上时暂停并询问；不要自行合并依赖分支。
-2. 确定 Ticket 分支名和独立 worktree 路径。路径使用主仓库同级目录，避免把一个 worktree 放进另一个 worktree。
-3. 确认目标分支和 worktree 路径尚不存在，然后使用 Git 通用命令创建：
+### 责任边界
 
-   ```bash
-   git worktree add -b <ticket-branch> <worktree-path> <base-commit>
-   ```
+顶层执行关系固定为：
 
-   如果命令失败，立即停止当前 Ticket，不退回主工作区，也不使用其他目录替代。
-4. 将创建好的 worktree 路径、目标分支、基线 commit、`SUBAGENT.md` 和 `IMPLEMENT.md` 的绝对路径、Ticket 完整内容及依赖关系传给一个 Subagent，并要求它在该 worktree 中工作。
-5. Subagent 开始修改前必须确认其实际 `pwd`、Git 仓库根目录、分支和基线 commit。路径或分支不匹配时立即停止。
-6. 等待 Subagent 完成。不得在它工作时启动另一个 Ticket，也不得由当前代理接手修改代码。
-7. Subagent 返回后，由当前代理只读核验：
-   - 报告中的 worktree 和分支确实存在；
-   - commit 存在且位于预期基线之上；
-   - 当前主工作区的 HEAD 和状态与启动时一致；
-   - 实现、类型检查、相关测试、最终完整测试和 code review 都有明确结果；
-   - code review 的可执行问题已经处理，或已明确阻塞。
-8. 核验通过后保留该 Ticket 的 worktree、分支和 commit，并记录其 commit 作为后续依赖的基线。
-9. 任意 Ticket 失败、阻塞、测试或类型检查失败、review 存在未解决问题、worktree 丢失，或主工作区发生变化时，立即停止后续执行并返回阻塞报告。
+```text
+主代理
+└── Ticket Subagent A：实现一个 Ticket
+    ├── TDD 子代理（如被实现流程创建）
+    └── code-review 子代理（如被实现流程创建）
+```
 
-“串行”只约束 Ticket 实现。`/code-review` 内部若按其自身机制启动只读审查者，属于当前 Ticket 的审查步骤；在审查完成前不得启动下一个 Ticket。
+1. 每个代理只管理自己的直属子代理，不越级管理。
+2. 子代理的结果和问题直接反馈给直属代理，由直属代理处理并汇总。
+3. API 调用失败时，由直属上级间隔重试，最多 5 次；重试复用原 Ticket、worktree、分支和上下文。
+4. 只有直属代理无法解决问题时，才向上一级报告；主代理只接收顶层 Ticket Subagent 的结果。
 
-## 编号、依赖和范围
+## 二、Ticket 执行前提
 
-- 使用真实 Ticket 标识符，例如 `#7`、`PROJ-42` 或本地追踪器中的 ID；不要改写成 `Ticket 001`。
-- 编号不连续是正常情况，不创建不存在的编号，不因编号大小改变顺序。
-- 用户指定“当前唯一可开始的 Ticket”时，只从它开始。
-- 只有依赖已经完成并通过核验，才可启动后续 Ticket。
-- 没有显式依赖时，遵循用户给出的顺序，仍然串行执行。
-- 不执行依赖链或本次范围之外的 Ticket。
-- 父级 PRD 只读，不修改、不关闭、不改变状态、不加评论、标签或进度。
+开始执行前必须明确：
 
-## Worktree 和分支
+1. 本次待实现的全部 Ticket 及其真实编号；
+2. Ticket 的执行顺序。
 
-- 每个 Ticket 使用 Git `worktree add` 创建独立 worktree 和分支。
-- 分支名包含真实 Ticket 标识符和短名称，例如 `ticket-7-provider-openai`。
-- worktree 路径使用主仓库同级目录，并在创建前确认路径和分支不存在。
-- 每个 worktree 和分支都保留，供用户审阅。
-- 当前代理不得进入 Ticket worktree 修改文件。
+任一项未知或存在歧义，都不得开始任务，必须先向用户确认。确认后的顺序就是执行链：每个后续 Ticket 默认继承前一个 Ticket 的完成 commit。
 
-## 实现契约
+## 三、依赖与执行顺序
 
-每个 Subagent 在实现前必须读取 `IMPLEMENT.md`，并把该文件作为实现、测试、审查和提交要求的唯一来源。不得在派发提示或其他文件中转述、删减或改写这些要求；后续更新以替换后的 `IMPLEMENT.md` 为准。
+1. 按照已确认的 Ticket 列表和执行顺序开始执行。
+2. 第一个 Ticket 从任务开始时锁定的基准 commit 创建；每个后续 Ticket 都从前一个 Ticket 的完成 commit 创建新的 worktree 和分支。
+3. 同一时间只能有一个 Subagent 工作。
+4. 只有当前 Ticket 完成并通过规定检查后，才能开始下一个 Ticket。
+5. 如果某个 Ticket 的顶层 Subagent A 失败、阻塞、测试失败、类型检查失败，或无法解决其后代子代理报告的问题：
+   - 立即停止后续 Ticket；
+   - 不要跳过该 Ticket；
+   - 不要自行改变执行顺序；
+   - 报告阻塞原因并等待用户决定。
+6. 不得为了建立执行链而合并到主分支。
+7. 如果 Ticket 缺失、顺序不明确或无法从前一个完成 commit 创建 worktree，先停止并报告，不要猜测。
 
-## 禁止的自动操作
+## 四、Subagent 的强制参考文件
 
-在用户明确审阅并授权前，所有代理都保持以下终态：
+每个 Subagent 在开始代码工作前，必须读取本 Skill 的 `references/implement-skill.md`。派发时提供该文件的绝对路径；读取失败则不得开始实现。
 
-- 不 merge 到当前分支；
-- 不 cherry-pick 到当前分支；
-- 不 rebase 当前分支；
-- 不 push；
-- 不删除或清理 worktree、分支或 commit；
-- 不关闭 Ticket；
-- 不修改 Ticket 的状态、标签或评论；
-- 不修改、关闭或更新父级 PRD；
-- 不自动继续处理范围外 Ticket。
+## 五、Worktree 与分支规则
 
-## 完成与阻塞
+1. 不得在当前分支或当前工作区直接修改代码。
+2. 每一个 Ticket 必须使用独立的 worktree 和独立分支。
+3. 创建 worktree 前，先解析仓库根目录、当前基准 commit、Ticket 真实编号和分支安全名称。
+4. worktree 创建失败时，立即停止，不得退回当前工作区执行。
+5. 每个 worktree 和分支都必须保留，方便用户审阅。
+6. 不得自动删除 worktree 或分支。
+7. 分支命名必须包含 Ticket 的真实编号和简短名称，例如：
 
-每个 Ticket 使用 `SUBAGENT.md` 中的完成或阻塞格式报告。所有 Ticket 完成后，汇总真实标识符、顺序、依赖、worktree、分支、commit、测试和 review 结果，列出审阅入口，然后停止。
+```text
+ticket/ABC-123-add-refund-flow
+```
 
-如果在启动前存在必须由用户决定的歧义，先集中提问并暂停；不要带着不确定的基线、依赖或范围开始修改。
+8. worktree 路径必须明确、唯一，并记录在报告中，例如：
+
+```text
+<repo-root>/../worktrees/ticket-ABC-123-add-refund-flow
+```
+
+9. 第一个 Ticket 从流程开始时锁定的基准 commit 创建；每个后续 Ticket 都从前一个 Ticket 的完成 commit 创建，不得隐式回到初始基准或跳过前一个 Ticket。
+
+## 六、派发 Ticket Subagent
+
+每个 Ticket 使用新的独立 Subagent。派发前必须提供：
+
+- 当前 Ticket 的完整内容或权威来源；
+- Ticket 编号和标题；
+- worktree 路径和分支名；
+- `references/implement-skill.md` 的绝对路径。
+
+派发提示：
+
+```text
+你负责实现 Ticket <编号>：<标题>。
+
+Ticket 内容：<完整正文或权威来源>
+工作目录：<worktree 路径>
+实现参考：<implement 参考文件绝对路径>
+
+先读取实现参考文件，再只在指定 worktree 中完成当前 Ticket。
+你负责管理自己创建的后代子代理；它们的问题先由你处理。
+完成后创建 commit，并返回本 Skill 规定的完成或阻塞报告。
+```
+
+## 七、实现与验证要求
+
+每个 Subagent 只需读取并严格遵循 `references/implement-skill.md`，其中已经包含实现、TDD、验证、code review 和 commit 要求。
+
+主代理只负责核验：
+
+- 参考文件已成功读取；
+- Ticket worktree 中存在正确的 commit；
+- Subagent 已返回实现和验证结果；
+- 当前工作区没有被修改。
+
+当前代理只核验顶层 Subagent 汇总后的结果，不直接处理后代子代理的中间报告。
+
+## 八、禁止的自动操作
+
+在用户明确审阅并授权之前，禁止：
+
+1. merge 到当前分支；
+2. cherry-pick 到当前分支；
+3. rebase 当前分支；
+4. push 到远程仓库；
+5. 删除或清理 worktree；
+6. 自动关闭 Ticket；
+7. 自动修改 Ticket 状态、标签或评论；
+8. 修改、关闭或更新父级 PRD；
+9. 自动开始不在当前执行范围内的 Ticket；
+10. 让当前代理直接修改 Ticket 代码以“帮助”Subagent 完成工作。
+
+## 九、父级 PRD 规则
+
+父级 PRD 只作为上下文和依赖来源：
+
+- 不把父级 PRD 当作待实现 Ticket；
+- 不修改父级 PRD 的内容；
+- 不关闭父级 PRD；
+- 不改变父级 PRD 的状态；
+- 不向父级 PRD 添加评论、标签或进度信息；
+- 除非用户明确授权，否则只读取，不写入。
+
+## 十、每个 Ticket 的完成报告
+
+每个 Ticket 完成后，必须返回：
+
+### Ticket <真实编号> 完成报告
+
+- Ticket 标识：
+- Ticket 标题：
+- 执行顺序：
+- 依赖关系：
+- Worktree 路径：
+- 分支名称：
+- Commit：
+- 修改的文件：
+- 实现摘要：
+- 相关测试结果：
+- 后代子代理及其结果摘要：
+- 遗留问题：
+- 建议审阅重点：
+
+顶层 Subagent 必须先向主代理返回完成报告。自动串行模式下，主代理核验并记录后直接启动下一个 Ticket，不等待用户确认；逐 Ticket 审阅模式下，才等待用户确认。
+
+## 十一、失败报告
+
+如果 Ticket 失败或阻塞，必须返回：
+
+### Ticket <真实编号> 阻塞报告
+
+- Ticket 标识：
+- Ticket 标题：
+- 执行顺序：
+- 依赖关系：
+- 阻塞原因：
+- API/工具重试次数与最终结果：
+- 后代子代理阻塞处理结果：
+- 是否修改过文件：
+- 是否创建过 commit：
+- Worktree 路径：
+- 分支名称：
+- 已执行的检查：
+- 错误信息：
+- 是否已停止后续 Ticket：是
+- 等待用户决定：是
+
+## 十二、全部完成后的行为
+
+当所有指定 Ticket 都完成后：
+
+1. 保留全部 worktree、分支和 commit；
+2. 不合并任何变更；
+3. 不关闭任何 Ticket 或父级 PRD；
+4. 返回总报告，简略汇总每个 Ticket 的实现、验证结果、worktree、分支和 commit；
+5. 给出每个 worktree 和 commit 的审阅入口；
+6. 明确说明当前分支没有被修改；
+7. 停止执行并等待用户审阅；
+8. 不要在用户明确授权前继续合并、清理或发布。
+
+## 十三、执行前提
+
+如果 Ticket 内容、执行顺序、初始基准 commit、Issue Tracker 状态或 worktree 位置存在歧义，必须在开始前询问用户。不要用猜测替代缺失的决策。
