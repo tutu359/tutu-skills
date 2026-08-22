@@ -34,9 +34,10 @@ Ticket 或顺序存在歧义时先向用户确认，不得猜测或跳过。
 3. 启动一个新的 Ticket Subagent A，并只提供：Ticket 完整内容、编号和标题、worktree 路径、分支名、`ticket-subagent.md` 绝对路径、`implement-skill.md` 绝对路径。
 4. A 开始后，主代理只等待 A 的完成报告或阻塞报告。不得接收、追问、转发或处理 A 的后代子代理消息。
 5. A 的 Agent/API 调用失败由主代理负责重试，总共最多 5 次。每次重试复用同一个 Ticket、worktree、分支和上下文，并记录 `第 N/5 次尝试`。第 5 次仍失败则生成阻塞记录并停止后续 Ticket。
-6. A 返回完成报告后，主代理只核验自己管理的主 worktree：报告对应 Ticket、该主 worktree 和分支存在、完成 commit 位于预期基线之上，以及 A 已给出实现检查结果。主代理不扫描或核验其他代理创建的 worktree，不重新执行实现细节，也不审查后代报告。
+6. A 返回完成报告后，主代理只核验自己管理的主 worktree：报告对应 Ticket、该主 worktree 和分支存在、完成 commit 位于预期基线之上、HEAD 等于报告中的完成 commit、工作区干净、A 已确认全部后代已结束或停止，以及 A 已给出实现检查结果。主代理不扫描或核验其他代理创建的 worktree，不重新执行实现细节，也不审查后代报告。
 7. 将 A 的完成或阻塞报告摘要追加到项目根目录的 `ticket-flow-record.md`。记录文件不纳入 Git。
-8. 只有完成报告核验通过后，才创建下一个 Ticket 的 worktree。
+8. 完成核验后，在创建下一个 Ticket 前再次读取上一个主 worktree 的 HEAD 和工作区状态。若出现晚到 commit、未提交修改、分支变化或其他状态漂移，立即停止，不回退、不清理、不覆盖，也不把漂移自动并入下一个 Ticket。
+9. 只有完成屏障和二次状态核验均通过后，才创建下一个 Ticket 的 worktree。
 
 ## Worktree、分支和 commit
 
@@ -46,6 +47,7 @@ Ticket 或顺序存在歧义时先向用户确认，不得猜测或跳过。
 - 主 worktree 路径必须明确、唯一，并记录在报告中。目录格式为 `<repo-parent>/worktrees/<项目名>/<ticket目录>`，例如 `<repo-root>/../worktrees/tutu-skills/ticket-ABC-123-add-refund-flow`。
 - 主代理不得在当前分支或任何 Ticket worktree 中修改业务代码。
 - 不得为了建立执行链而 merge、cherry-pick 或 rebase。
+- Ticket 完成后，主 worktree 进入冻结状态；任何后代不得继续访问或修改它。需要继续处理的 review 发现必须进入阻塞报告或后续 Ticket，不得直接写回已完成 Ticket。
 
 ## 直属责任和越界防护
 
@@ -76,7 +78,7 @@ Ticket 或顺序存在歧义时先向用户确认，不得猜测或跳过。
 
 ## 停止条件和总报告
 
-任一 Ticket 缺失、顺序不明、主 worktree 创建失败、A 第 5 次调用仍失败、A 返回最终阻塞、完成报告核验失败或主代理管理的主 worktree 状态异常，立即停止后续 Ticket，并在记录文件中写入阻塞报告，等待用户决定。其他代理创建的 worktree、分支、临时 commit 或元数据目录不触发停止条件。
+任一 Ticket 缺失、顺序不明、主 worktree 创建失败、A 第 5 次调用仍失败、A 返回最终阻塞、完成报告核验失败，或主代理管理的主 worktree 在完成核验后发生状态漂移，立即停止后续 Ticket，并在记录文件中写入阻塞报告，等待用户决定。其他代理创建的隔离 worktree、分支、临时 commit 或元数据目录不触发停止条件；后代越界写入主 worktree 则属于主 worktree 状态漂移，必须停止。
 
 全部 Ticket 完成后：
 
