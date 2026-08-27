@@ -103,7 +103,7 @@ func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return args, fmt.Errorf("img-gen Provider Configuration is missing at %s; create it with defaultProvider and providers.openai.baseURL, apiKey, and model, then retry", path)
+			return args, fmt.Errorf("img-gen Provider Configuration is missing at %s; create it with defaultProvider and providers.<provider>.baseURL, apiKey, and model, then retry", path)
 		}
 		return args, fmt.Errorf("could not read img-gen Provider Configuration %s: %w", path, err)
 	}
@@ -118,8 +118,8 @@ func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
 	if provider == "" {
 		return args, fmt.Errorf("no Provider selected; pass --provider or set defaultProvider in %s", path)
 	}
-	if provider != "openai" {
-		return args, fmt.Errorf("unsupported Provider %q; supported Provider: openai", provider)
+	if provider != "openai" && provider != "google" {
+		return args, fmt.Errorf("unsupported Provider %q; supported Providers: openai, google", provider)
 	}
 	selected, ok := config.Providers[provider]
 	if !ok {
@@ -143,7 +143,7 @@ func validateCommon(args commonArgs) error {
 		return errors.New("Provider Selection is required")
 	}
 	if strings.TrimSpace(args.baseURL) == "" {
-		return errors.New("OpenAI Provider Configuration baseURL is empty")
+		return errors.New("Provider Configuration baseURL is empty")
 	}
 	if args.maxAttempts < 1 {
 		return errors.New("--max-attempts must be at least 1")
@@ -374,9 +374,141 @@ func saveImages(images [][]byte, paths []string) ([]string, error) {
 	return abs, nil
 }
 
+func googleEndpoint(base, model string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if !strings.HasSuffix(base, "/v1beta") {
+		base += "/v1beta"
+	}
+	return base + "/models/" + url.PathEscape(model) + ":predict"
+}
+
+func googleRequestURL(endpoint, key string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Google Provider Configuration baseURL: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("key", key)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func googlePayload(prompt string) map[string]any {
+	return map[string]any{
+		"instances":  []map[string]any{{"prompt": prompt}},
+		"parameters": map[string]any{"sampleCount": 1},
+	}
+}
+
+func decodeGoogleResponse(raw []byte) ([][]byte, error) {
+	var result struct {
+		Predictions []struct {
+			BytesBase64Encoded string `json:"bytesBase64Encoded"`
+		} `json:"predictions"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, errors.New("Google API returned invalid JSON")
+	}
+	if len(result.Predictions) == 0 {
+		return nil, errors.New("Google API response contains no image data")
+	}
+	images := make([][]byte, 0, len(result.Predictions))
+	for _, prediction := range result.Predictions {
+		if prediction.BytesBase64Encoded == "" {
+			return nil, errors.New("Google API image entry contains no bytesBase64Encoded data")
+		}
+		data, err := base64.StdEncoding.DecodeString(prediction.BytesBase64Encoded)
+		if err != nil {
+			return nil, errors.New("Google API returned invalid base64 image data")
+		}
+		images = append(images, data)
+	}
+	return images, nil
+}
+
+func googleImagesPayload(prompt string, imagePaths []string, mask string) (map[string]any, error) {
+	encodedImages := make([]string, len(imagePaths))
+	for i, path := range imagePaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("could not read input image: %w", err)
+		}
+		encodedImages[i] = base64.StdEncoding.EncodeToString(data)
+	}
+	instance := map[string]any{"prompt": prompt}
+	if len(encodedImages) == 1 {
+		instance["image"] = map[string]string{"bytesBase64Encoded": encodedImages[0]}
+	} else {
+		images := make([]map[string]string, len(encodedImages))
+		for i, encoded := range encodedImages {
+			images[i] = map[string]string{"bytesBase64Encoded": encoded}
+		}
+		instance["images"] = images
+	}
+	if mask != "" {
+		data, err := os.ReadFile(mask)
+		if err != nil {
+			return nil, fmt.Errorf("could not read mask: %w", err)
+		}
+		instance["mask"] = map[string]any{"image": map[string]string{"bytesBase64Encoded": base64.StdEncoding.EncodeToString(data)}}
+	}
+	return map[string]any{
+		"instances":  []map[string]any{instance},
+		"parameters": map[string]any{"sampleCount": 1},
+	}, nil
+}
+
+func googleExecute(payload map[string]any, args commonArgs) ([][]byte, error) {
+	ep := googleEndpoint(args.baseURL, args.model)
+	requestURL, err := googleRequestURL(ep, strings.TrimSpace(args.apiKey))
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("could not encode Google request: %w", err)
+	}
+	client := &http.Client{Timeout: args.timeout}
+	raw, err := doRequest(client, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, requestURL, bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return req, err
+	}, args.maxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGoogleResponse(raw)
+}
+
+func googleGenerate(prompt, out string, args commonArgs) (map[string]any, error) {
+	paths := outputPaths(out, args.outDir, prompt)
+	if err := checkOutputs(paths, args.force); err != nil {
+		return nil, err
+	}
+	payload := googlePayload(prompt)
+	ep := googleEndpoint(args.baseURL, args.model)
+	if args.dryRun {
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "payload": payload, "outputs": paths}, nil
+	}
+	images, err := googleExecute(payload, args)
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := saveImages(images, paths)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+}
+
 func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 	if err := validateCommon(args); err != nil {
 		return nil, err
+	}
+	if args.provider == "google" {
+		return googleGenerate(prompt, out, args)
 	}
 	paths := outputPaths(out, args.outDir, prompt)
 	if err := checkOutputs(paths, args.force); err != nil {
@@ -415,6 +547,9 @@ func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 func edit(prompt string, imagePaths []string, mask, out string, args commonArgs) (map[string]any, error) {
 	if err := validateCommon(args); err != nil {
 		return nil, err
+	}
+	if args.provider == "google" {
+		return googleEdit(prompt, imagePaths, mask, out, args)
 	}
 	for _, path := range append(append([]string{}, imagePaths...), mask) {
 		if path == "" {
@@ -495,6 +630,38 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
 }
 
+func googleEdit(prompt string, imagePaths []string, mask, out string, args commonArgs) (map[string]any, error) {
+	for _, path := range append(append([]string{}, imagePaths...), mask) {
+		if path == "" {
+			continue
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			return nil, fmt.Errorf("input file not found: %s", path)
+		}
+	}
+	paths := outputPaths(out, args.outDir, prompt)
+	if err := checkOutputs(paths, args.force); err != nil {
+		return nil, err
+	}
+	payload, err := googleImagesPayload(prompt, imagePaths, mask)
+	if err != nil {
+		return nil, err
+	}
+	ep := googleEndpoint(args.baseURL, args.model)
+	if args.dryRun {
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "payload": payload, "images": imagePaths, "mask": mask, "outputs": paths}, nil
+	}
+	images, err := googleExecute(payload, args)
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := saveImages(images, paths)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+}
+
 func writeJSON(w io.Writer, value any) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
@@ -511,7 +678,7 @@ func parseCommon(fs *flag.FlagSet, argv []string, args *commonArgs) error {
 	fs.StringVar(&args.provider, "provider", "", "Provider Selection (for example, openai)")
 	// --base-url is retained as an explicit endpoint override for local gateways;
 	// it never selects a Provider and is never populated from environment variables.
-	fs.StringVar(&args.baseURLOverride, "base-url", "", "explicit OpenAI endpoint override")
+	fs.StringVar(&args.baseURLOverride, "base-url", "", "explicit selected Provider endpoint override")
 	fs.StringVar(&args.size, "size", defaultSize, "auto or WIDTHxHEIGHT")
 	fs.StringVar(&args.quality, "quality", defaultQuality, "low, medium, high, or auto")
 	fs.StringVar(&args.outDir, "out-dir", defaultOutDir, "default output directory")

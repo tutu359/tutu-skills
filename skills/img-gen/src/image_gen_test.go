@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -982,6 +983,220 @@ func decodeFailureResult(t *testing.T, output *bytes.Buffer) failureResult {
 	return failure
 }
 
+func TestGoogleProviderUsesGoogleProtocolAndConfiguration(t *testing.T) {
+	const png = "aGVsbG8="
+	var authorization string
+	var payload struct {
+		Instances []struct {
+			Prompt string `json:"prompt"`
+		} `json:"instances"`
+		Parameters struct {
+			SampleCount int `json:"sampleCount"`
+		} `json:"parameters"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/google-imagen:predict" {
+			t.Errorf("Google request path = %q, want /v1beta/models/google-imagen:predict", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("key"); got != "google-key" {
+			t.Errorf("Google API key query = %q, want google-key", got)
+		}
+		authorization = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode Google request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"openai":{"baseURL":"http://openai.invalid","apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":%q,"apiKey":"google-key","model":"google-imagen"}}}`, server.URL))
+	var output bytes.Buffer
+	outDir := t.TempDir()
+	if err := runGenerate([]string{"--prompt", "a Google image", "--out-dir", outDir, "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runGenerate returned an error: %v", err)
+	}
+	if authorization != "" {
+		t.Fatalf("Google request sent Authorization header %q", authorization)
+	}
+	if len(payload.Instances) != 1 || payload.Instances[0].Prompt != "a Google image" {
+		t.Fatalf("Google instances = %+v, want one unchanged prompt", payload.Instances)
+	}
+	if payload.Parameters.SampleCount != 1 {
+		t.Fatalf("Google sampleCount = %d, want 1", payload.Parameters.SampleCount)
+	}
+	var result struct {
+		Provider string   `json:"provider"`
+		Model    string   `json:"model"`
+		Outputs  []string `json:"outputs"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode Google output: %v", err)
+	}
+	if result.Provider != "google" || result.Model != "google-imagen" || len(result.Outputs) != 1 {
+		t.Fatalf("Google result = %+v, want provider/model and one output", result)
+	}
+	if data, err := os.ReadFile(result.Outputs[0]); err != nil || string(data) != "hello" {
+		t.Fatalf("Google output data = %q, read error = %v, want hello", data, err)
+	}
+}
+
+func TestGoogleProviderEditUsesJSONImageProtocol(t *testing.T) {
+	const png = "aGVsbG8="
+	root := t.TempDir()
+	input := filepath.Join(root, "input.png")
+	mask := filepath.Join(root, "mask.png")
+	if err := os.WriteFile(input, []byte("input image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mask, []byte("mask image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Instances []struct {
+			Prompt string `json:"prompt"`
+			Image  struct {
+				Bytes string `json:"bytesBase64Encoded"`
+			} `json:"image"`
+			Mask struct {
+				Image struct {
+					Bytes string `json:"bytesBase64Encoded"`
+				} `json:"image"`
+			} `json:"mask"`
+		} `json:"instances"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta/models/google-editor:predict" {
+			t.Errorf("Google edit path = %q, want /v1beta/models/google-editor:predict", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("key"); got != "google-edit-key" {
+			t.Errorf("Google edit API key query = %q, want google-edit-key", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Google edit sent Authorization header %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode Google edit request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"google-edit-key","model":"google-editor"}}}`, server.URL))
+	var output bytes.Buffer
+	if err := runEdit([]string{"--image", input, "--mask", mask, "--prompt", "edit with Google", "--out-dir", filepath.Join(root, "out"), "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runEdit returned an error: %v", err)
+	}
+	if len(payload.Instances) != 1 || payload.Instances[0].Prompt != "edit with Google" {
+		t.Fatalf("Google edit instances = %+v, want one unchanged prompt", payload.Instances)
+	}
+	if payload.Instances[0].Image.Bytes != base64.StdEncoding.EncodeToString([]byte("input image")) {
+		t.Fatalf("Google edit image bytes = %q", payload.Instances[0].Image.Bytes)
+	}
+	if payload.Instances[0].Mask.Image.Bytes != base64.StdEncoding.EncodeToString([]byte("mask image")) {
+		t.Fatalf("Google edit mask bytes = %q", payload.Instances[0].Mask.Image.Bytes)
+	}
+}
+
+func TestGoogleProviderFailuresUseCommonRetryRules(t *testing.T) {
+	const png = "aGVsbG8="
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"google-key","model":"google-model"}}}`, server.URL))
+	var output bytes.Buffer
+	if err := runGenerate([]string{"--prompt", "retry Google", "--out-dir", t.TempDir(), "--max-attempts", "2"}, &output); err != nil {
+		t.Fatalf("Google 5xx retry returned an error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("Google 5xx request count = %d, want 2", requests)
+	}
+
+	requests = 0
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":"google-key must not be reported"}`)
+	}))
+	defer server2.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"google-key","model":"google-model"}}}`, server2.URL))
+	output.Reset()
+	err := runGenerate([]string{"--prompt", "no Google 4xx retry", "--out-dir", t.TempDir(), "--max-attempts", "3"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("Google 4xx error = %v, want HTTP 401", err)
+	}
+	if requests != 1 {
+		t.Fatalf("Google 4xx request count = %d, want 1", requests)
+	}
+	if strings.Contains(output.String(), "google-key") {
+		t.Fatalf("Google failure leaked API key: %s", output.String())
+	}
+}
+
+func TestGoogleProviderBatchUsesCommonOutputAndSummary(t *testing.T) {
+	const png = "aGVsbG8="
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("key") != "batch-google-key" {
+			t.Errorf("batch Google API key = %q, want batch-google-key", r.URL.Query().Get("key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"batch-google-key","model":"batch-google-model"}}}`, server.URL))
+	input := writeBatchInput(t, `{"operation":"generate","prompt":"batch Google image","out":"google.png"}`+"\n")
+	outDir := t.TempDir()
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", outDir, "--concurrency", "1", "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runBatch returned an error: %v", err)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if requests != 1 || len(summary.Jobs) != 1 || !summary.Jobs[0].OK || summary.Jobs[0].Provider != "google" || summary.Jobs[0].Model != "batch-google-model" {
+		t.Fatalf("Google batch requests/summary = %d/%+v", requests, summary.Jobs)
+	}
+	if len(summary.Jobs[0].Outputs) != 1 {
+		t.Fatalf("Google batch outputs = %+v, want one output", summary.Jobs[0].Outputs)
+	}
+	if _, err := os.Stat(summary.Jobs[0].Outputs[0]); err != nil {
+		t.Fatalf("Google batch output was not saved: %v", err)
+	}
+}
+
+func TestExplicitGoogleProviderDoesNotUseOpenAIConfiguration(t *testing.T) {
+	const png = "aGVsbG8="
+	var googleRequests, openAIRequests int
+	googleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		googleRequests++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+	}))
+	defer googleServer.Close()
+	openAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openAIRequests++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer openAIServer.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"openai","providers":{"openai":{"baseURL":%q,"apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":%q,"apiKey":"google-key","model":"google-model"}}}`, openAIServer.URL, googleServer.URL))
+	var output bytes.Buffer
+	if err := runGenerate([]string{"--provider", "google", "--prompt", "explicit Google", "--out-dir", t.TempDir(), "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("explicit Google Provider Selection failed: %v", err)
+	}
+	if googleRequests != 1 || openAIRequests != 0 {
+		t.Fatalf("Provider isolation requests = Google %d, OpenAI %d; want 1, 0", googleRequests, openAIRequests)
+	}
+}
+
 func TestGenerateRetries5xxWithinBoundedAttempts(t *testing.T) {
 	var mu sync.Mutex
 	var requests int
@@ -1126,7 +1341,7 @@ func TestGenerateTimeoutRetriesWithinBoundedAttempts(t *testing.T) {
 	defer server.Close()
 	writeProviderConfig(t, server.URL)
 	var output bytes.Buffer
-	err := runGenerate([]string{"--prompt", "too slow", "--out-dir", t.TempDir(), "--timeout", "0.001", "--max-attempts", "2"}, &output)
+	err := runGenerate([]string{"--prompt", "too slow", "--out-dir", t.TempDir(), "--timeout", "0.05", "--max-attempts", "2"}, &output)
 	if err == nil || !strings.Contains(err.Error(), "network error or timeout") {
 		t.Fatalf("runGenerate error = %v, want timeout failure", err)
 	}

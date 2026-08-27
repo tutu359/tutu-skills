@@ -40,6 +40,23 @@ func TestProviderReferenceDocumentsOpenAIFactsOnly(t *testing.T) {
 	}
 }
 
+func TestProviderReferenceDocumentsGoogleFactsOnly(t *testing.T) {
+	data, err := os.ReadFile("../references/providers/google.md")
+	if err != nil {
+		t.Fatalf("read Google Provider reference: %v", err)
+	}
+	doc := string(data)
+	requireDocFragments(t, doc, "# Google Provider", "baseURL", "apiKey", "model", "/v1beta/models/<model>:predict", "instances", "predictions", "bytesBase64Encoded")
+	if strings.Contains(doc, "IMAGE_API_") || strings.Contains(doc, "--concurrency") || strings.Contains(doc, "chmod +x") || strings.Contains(doc, "common troubleshooting") {
+		t.Fatal("Google Provider reference duplicates common troubleshooting rules")
+	}
+}
+
+func TestSkillDocumentsDeclareGoogleProviderContract(t *testing.T) {
+	skill, _ := readSkillContract(t)
+	requireDocFragments(t, skill, "OpenAI or Google Provider", `"google":`, "imagen-3.0-generate-002")
+}
+
 func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 	skill, batch := readSkillContract(t)
 	requireDocFragments(t, skill,

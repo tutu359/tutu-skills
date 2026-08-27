@@ -1,6 +1,6 @@
 ---
 name: img-gen
-description: Generate and edit raster images through the configured OpenAI Provider. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits.
+description: Generate and edit raster images through the configured OpenAI or Google Provider. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits.
 ---
 
 # img-gen
@@ -25,12 +25,17 @@ The CLI reads the user-level JSON file at the operating system's user configurat
       "baseURL": "https://api.openai.com",
       "apiKey": "configured-locally",
       "model": "gpt-image-1"
+    },
+    "google": {
+      "baseURL": "https://generativelanguage.googleapis.com",
+      "apiKey": "configured-locally",
+      "model": "imagen-3.0-generate-002"
     }
   }
 }
 ```
 
-`baseURL`, `apiKey`, and `model` belong to the selected Provider and are not shared with another Provider. Pass `--provider openai` to select OpenAI for one command and override `defaultProvider`. The CLI ignores all legacy `IMAGE_API_*` environment variables.
+`baseURL`, `apiKey`, and `model` belong to the selected Provider and are not shared with another Provider. Pass `--provider openai` or `--provider google` to select a Provider for one command and override `defaultProvider`. The CLI ignores all legacy `IMAGE_API_*` environment variables.
 
 ## Fast path
 
