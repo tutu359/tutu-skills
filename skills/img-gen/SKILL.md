@@ -148,7 +148,7 @@ Each non-empty line is one job. Every job must explicitly set `operation` to `ge
 - The CLI preflights every operation, prompt, input file, output conflict, and duplicate resolved output before any network request. Do not compensate for preflight with workspace searches or manual checks.
 - Batch concurrency is `--concurrency`, or the CLI default of `5`. The worker pool replaces completed jobs immediately.
 - By default, a failed job does not stop other jobs. Successful files remain, the summary stays in input order, and the process exits nonzero if any job fails. `--fail-fast` stops scheduling jobs not yet started while already-started jobs finish.
-- The JSON summary identifies each job by `index` and `operation`, and reports successful `outputs` or an `error` reason.
+- The JSON summary identifies each job by `index` and `operation`, and reports successful `outputs` or an `error` reason, with the HTTP `status` when available.
 
 Read [references/batch-format.md](references/batch-format.md) only when resolving a batch-format question or error.
 

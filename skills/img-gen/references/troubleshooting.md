@@ -14,7 +14,8 @@ Read this file only after a command fails or when the user asks about configurat
 
 - On macOS, after a permission-denied error, run `chmod +x bin/img-gen bin/img-gen-darwin-*` and retry once. Do not run it preemptively.
 - On Windows, use `bin\img-gen.cmd`; it selects `img-gen-windows-amd64.exe` or `img-gen-windows-arm64.exe` from the system architecture variables.
-- The CLI retries network timeouts and HTTP 429/500/502/503/504/524 failures with bounded backoff. It honors a valid `Retry-After` header, capped at 30 seconds.
-- Do not retry authentication, validation, or ordinary 4xx errors.
+- The CLI retries network timeouts and HTTP `5xx` failures with bounded backoff. It honors a valid `Retry-After` header, capped at 30 seconds.
+- Every HTTP `4xx` failure, including `429`, authentication, validation, and policy or copyright refusals, stops on the first attempt without retry.
+- After the Provider is selected, a failed single-image command prints a JSON failure result with `provider`, `model`, the HTTP `status` when available, and a safe message, then exits nonzero; a failed batch reports the same fields per job. Failures before Provider Selection report only an error message.
 - On repeated timeout, try lower quality, a square size, fewer concurrent jobs, or a later retry.
 - Never expose authorization headers, API keys, or full API response bodies.

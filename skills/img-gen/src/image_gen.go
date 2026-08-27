@@ -32,8 +32,6 @@ const (
 	retryMaxDelay           = 30 * time.Second
 )
 
-var retryable = map[int]bool{500: true, 502: true, 503: true, 504: true, 524: true}
-
 type commonArgs struct {
 	provider        string
 	baseURL         string
@@ -259,6 +257,26 @@ func retryDelay(retryAfter string, attempt int) time.Duration {
 	return time.Duration(float64(delay) * (0.8 + rand.Float64()*0.4))
 }
 
+// apiError is a Provider execution failure carrying a safe message. Status is
+// the HTTP status the Provider returned, or 0 for network and timeout failures,
+// which have no HTTP status.
+type apiError struct {
+	Status  int
+	message string
+}
+
+func (e *apiError) Error() string { return e.message }
+
+// apiStatus reports the HTTP status carried by an execution error, or 0 when
+// the failure has no HTTP status.
+func apiStatus(err error) int {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status
+	}
+	return 0
+}
+
 func doRequest(client *http.Client, makeRequest func() (*http.Request, error), maxAttempts int) ([]byte, error) {
 	var last string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -278,8 +296,10 @@ func doRequest(client *http.Client, makeRequest func() (*http.Request, error), m
 				return body, nil
 			}
 			last = fmt.Sprintf("API request failed with HTTP %d", resp.StatusCode)
-			if !retryable[resp.StatusCode] || attempt == maxAttempts {
-				return nil, errors.New(last)
+			// One unified rule: HTTP 5xx retries within the bounded attempts;
+			// every other status, including every 4xx, fails on this attempt.
+			if resp.StatusCode < 500 || attempt == maxAttempts {
+				return nil, &apiError{Status: resp.StatusCode, message: last}
 			}
 			delay := retryDelay(retryAfter, attempt)
 			fmt.Fprintf(os.Stderr, "attempt %d/%d failed with HTTP %d; retrying in %s\n", attempt, maxAttempts, resp.StatusCode, delay.Round(time.Millisecond))
@@ -287,14 +307,14 @@ func doRequest(client *http.Client, makeRequest func() (*http.Request, error), m
 		} else {
 			last = "API request failed: network error or timeout"
 			if attempt == maxAttempts {
-				return nil, errors.New(last)
+				return nil, &apiError{message: last}
 			}
 			delay := retryDelay("", attempt)
 			fmt.Fprintf(os.Stderr, "attempt %d/%d failed with a network error or timeout; retrying in %s\n", attempt, maxAttempts, delay.Round(time.Millisecond))
 			time.Sleep(delay)
 		}
 	}
-	return nil, errors.New(last)
+	return nil, &apiError{message: last}
 }
 
 func decodeResponse(raw []byte, client *http.Client) ([][]byte, error) {
@@ -531,11 +551,11 @@ func runGenerate(argv []string, output io.Writer) error {
 	}
 	finalPrompt, err := promptValue(prompt, promptFile)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	result, err := generate(finalPrompt, out, args)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	return writeJSON(output, result)
 }
@@ -559,17 +579,38 @@ func runEdit(argv []string, output io.Writer) error {
 		return err
 	}
 	if len(images) == 0 {
-		return errors.New("provide at least one --image")
+		return reportFailure(output, args, errors.New("provide at least one --image"))
 	}
 	finalPrompt, err := promptValue(prompt, promptFile)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	result, err := edit(finalPrompt, images, mask, out, args)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	return writeJSON(output, result)
+}
+
+// failureResult is the stable JSON result of a failed single-image operation:
+// the selected Provider, Model, the HTTP status when the Provider returned one,
+// and a safe message. Batch job summaries reuse these fields for failed jobs.
+type failureResult struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Status   int    `json:"status,omitempty"`
+	Error    string `json:"error"`
+}
+
+// reportFailure writes the stable failure result for a failed single-image
+// operation and returns the execution error so the command still exits nonzero
+// with its original message.
+func reportFailure(w io.Writer, args commonArgs, err error) error {
+	result := failureResult{Provider: args.provider, Model: args.model, Status: apiStatus(err), Error: err.Error()}
+	if writeErr := writeJSON(w, result); writeErr != nil {
+		return errors.Join(err, writeErr)
+	}
+	return err
 }
 
 type batchResult struct {
@@ -580,6 +621,7 @@ type batchResult struct {
 	OK        bool           `json:"ok"`
 	Outputs   []string       `json:"outputs,omitempty"`
 	Data      map[string]any `json:"data,omitempty"`
+	Status    int            `json:"status,omitempty"`
 	Error     string         `json:"error,omitempty"`
 }
 
@@ -839,6 +881,7 @@ func runBatch(argv []string, output io.Writer) error {
 		result := batchResult{Index: finished.index + 1, Operation: jobs[finished.index].Operation, Provider: resolvedArgs[finished.index].provider, Model: resolvedArgs[finished.index].model, OK: finished.err == nil, Data: finished.data}
 		if finished.err != nil {
 			result.Error = finished.err.Error()
+			result.Status = apiStatus(finished.err)
 			failed = true
 		} else if outputs, ok := finished.data["outputs"].([]string); ok {
 			result.Outputs = outputs

@@ -967,3 +967,336 @@ func TestRunBatchSummaryIncludesOperationForFailedJob(t *testing.T) {
 		t.Fatalf("summary success/failure = %+v, want output and failure reason", summary.Jobs)
 	}
 }
+
+func writeProviderConfig(t *testing.T, serverURL string) {
+	t.Helper()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"openai","providers":{"openai":{"baseURL":%q,"apiKey":"fake-test-key","model":"fake-model"}}}`, serverURL))
+}
+
+func decodeFailureResult(t *testing.T, output *bytes.Buffer) failureResult {
+	t.Helper()
+	var failure failureResult
+	if err := json.Unmarshal(output.Bytes(), &failure); err != nil {
+		t.Fatalf("decode failure result: %v\n%s", err, output.String())
+	}
+	return failure
+}
+
+func TestGenerateRetries5xxWithinBoundedAttempts(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	writeProviderConfig(t, server.URL)
+	var output bytes.Buffer
+	err := runGenerate([]string{"--prompt", "retry me", "--out-dir", t.TempDir(), "--max-attempts", "3"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "API request failed with HTTP 500") {
+		t.Fatalf("runGenerate error = %v, want bounded HTTP 500 failure", err)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("server received %d requests, want 3 bounded attempts", got)
+	}
+	failure := decodeFailureResult(t, &output)
+	if failure.Provider != "openai" || failure.Model != "fake-model" {
+		t.Fatalf("failure Provider/Model = %q/%q, want openai/fake-model", failure.Provider, failure.Model)
+	}
+	if failure.Status != 500 || failure.Error != "API request failed with HTTP 500" {
+		t.Fatalf("failure result = %+v, want HTTP 500 status and safe message", failure)
+	}
+}
+
+func TestGenerateRecoversAfter5xxRetry(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		count := requests
+		mu.Unlock()
+		if count == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeProviderConfig(t, server.URL)
+	outDir := t.TempDir()
+	var output bytes.Buffer
+	if err := runGenerate([]string{"--prompt", "flaky provider", "--out-dir", outDir, "--max-attempts", "3"}, &output); err != nil {
+		t.Fatalf("runGenerate did not recover after a 5xx retry: %v", err)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("server received %d requests, want one 5xx attempt plus one retry", got)
+	}
+	var result struct {
+		Provider string   `json:"provider"`
+		Model    string   `json:"model"`
+		Outputs  []string `json:"outputs"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode success result: %v\n%s", err, output.String())
+	}
+	if result.Provider != "openai" || result.Model != "fake-model" || len(result.Outputs) != 1 {
+		t.Fatalf("success result = %+v, want openai/fake-model with one output", result)
+	}
+	if _, err := os.Stat(result.Outputs[0]); err != nil {
+		t.Fatalf("recovered output %q is not saved: %v", result.Outputs[0], err)
+	}
+}
+
+func TestSingleImageCommandsDoNotRetryAny4xx(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
+		for _, command := range []string{"generate", "edit"} {
+			t.Run(fmt.Sprintf("%s-%d", command, status), func(t *testing.T) {
+				var mu sync.Mutex
+				var requests int
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					requests++
+					mu.Unlock()
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(status)
+				}))
+				defer server.Close()
+				writeProviderConfig(t, server.URL)
+				var argv []string
+				if command == "edit" {
+					input := filepath.Join(t.TempDir(), "input.png")
+					if err := os.WriteFile(input, []byte("input image"), 0644); err != nil {
+						t.Fatal(err)
+					}
+					argv = append(argv, "--image", input)
+				}
+				argv = append(argv, "--prompt", "rejected request", "--out-dir", t.TempDir(), "--max-attempts", "3")
+				var output bytes.Buffer
+				var err error
+				if command == "generate" {
+					err = runGenerate(argv, &output)
+				} else {
+					err = runEdit(argv, &output)
+				}
+				want := fmt.Sprintf("API request failed with HTTP %d", status)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("%s error = %v, want immediate %q failure", command, err, want)
+				}
+				mu.Lock()
+				got := requests
+				mu.Unlock()
+				if got != 1 {
+					t.Fatalf("%s made %d requests for HTTP %d, want exactly 1", command, got, status)
+				}
+				failure := decodeFailureResult(t, &output)
+				if failure.Provider != "openai" || failure.Model != "fake-model" {
+					t.Fatalf("failure Provider/Model = %q/%q, want openai/fake-model", failure.Provider, failure.Model)
+				}
+				if failure.Status != status || failure.Error != want {
+					t.Fatalf("failure result = %+v, want status %d with %q", failure, status, want)
+				}
+			})
+		}
+	}
+}
+
+func TestGenerateTimeoutRetriesWithinBoundedAttempts(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"b64_json":"aGVsbG8="}]}`)
+	}))
+	defer server.Close()
+	writeProviderConfig(t, server.URL)
+	var output bytes.Buffer
+	err := runGenerate([]string{"--prompt", "too slow", "--out-dir", t.TempDir(), "--timeout", "0.001", "--max-attempts", "2"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "network error or timeout") {
+		t.Fatalf("runGenerate error = %v, want timeout failure", err)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("server received %d requests, want 2 bounded timeout attempts", got)
+	}
+	failure := decodeFailureResult(t, &output)
+	if failure.Provider != "openai" || failure.Model != "fake-model" {
+		t.Fatalf("failure Provider/Model = %q/%q, want openai/fake-model", failure.Provider, failure.Model)
+	}
+	if failure.Status != 0 {
+		t.Fatalf("failure status = %d, want no HTTP status for a timeout", failure.Status)
+	}
+	if failure.Error != "API request failed: network error or timeout" {
+		t.Fatalf("failure error = %q, want safe timeout message", failure.Error)
+	}
+}
+
+func TestGenerateNetworkFailureFailsWithoutHTTPStatus(t *testing.T) {
+	writeProviderConfig(t, "http://127.0.0.1:1")
+	var output bytes.Buffer
+	err := runGenerate([]string{"--prompt", "unreachable", "--out-dir", t.TempDir(), "--max-attempts", "1"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "network error or timeout") {
+		t.Fatalf("runGenerate error = %v, want network failure", err)
+	}
+	failure := decodeFailureResult(t, &output)
+	if failure.Provider != "openai" || failure.Model != "fake-model" {
+		t.Fatalf("failure Provider/Model = %q/%q, want openai/fake-model", failure.Provider, failure.Model)
+	}
+	if failure.Status != 0 || failure.Error != "API request failed: network error or timeout" {
+		t.Fatalf("failure result = %+v, want no HTTP status and safe network message", failure)
+	}
+}
+
+func TestGenerateFailureResultDoesNotExposeProviderErrorDetails(t *testing.T) {
+	const fakeKey = "fake-leaky-key-12345"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, `{"error":{"message":"invalid API key %q","type":"invalid_request_error"},"echoed_authorization":%q}`, fakeKey, "Bearer "+fakeKey)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"openai","providers":{"openai":{"baseURL":%q,"apiKey":%q,"model":"fake-model"}}}`, server.URL, fakeKey))
+	var output bytes.Buffer
+	err := runGenerate([]string{"--prompt", "secret check", "--out-dir", t.TempDir(), "--max-attempts", "1"}, &output)
+	if err == nil || err.Error() != "API request failed with HTTP 401" {
+		t.Fatalf("runGenerate error = %v, want only the HTTP status message", err)
+	}
+	failure := decodeFailureResult(t, &output)
+	if failure.Provider != "openai" || failure.Model != "fake-model" {
+		t.Fatalf("failure Provider/Model = %q/%q, want openai/fake-model", failure.Provider, failure.Model)
+	}
+	if failure.Status != 401 || failure.Error != "API request failed with HTTP 401" {
+		t.Fatalf("failure result = %+v, want status 401 with the safe message", failure)
+	}
+	for _, secret := range []string{fakeKey, "Bearer", "invalid_request_error", "Authorization"} {
+		if strings.Contains(output.String(), secret) {
+			t.Fatalf("failure output leaked %q: %s", secret, output.String())
+		}
+	}
+}
+
+func TestRunBatch4xxJobsFailOnceAndPreservePartialSuccess(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var mu sync.Mutex
+	requests := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		requests[payload.Prompt]++
+		mu.Unlock()
+		switch payload.Prompt {
+		case "rejected-429":
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "rejected-403":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+		}
+	}))
+	defer server.Close()
+	writeProviderConfig(t, server.URL)
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"rejected-429\",\"out\":\"one.png\"}\n{\"operation\":\"generate\",\"prompt\":\"succeeds\",\"out\":\"two.png\"}\n{\"operation\":\"generate\",\"prompt\":\"rejected-403\",\"out\":\"three.png\"}\n")
+	var output bytes.Buffer
+	err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--concurrency", "1", "--max-attempts", "3"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "one or more batch jobs failed") {
+		t.Fatalf("runBatch error = %v, want nonzero batch failure", err)
+	}
+	mu.Lock()
+	counts := make(map[string]int, len(requests))
+	for prompt, count := range requests {
+		counts[prompt] = count
+	}
+	mu.Unlock()
+	if counts["rejected-429"] != 1 || counts["rejected-403"] != 1 || counts["succeeds"] != 1 {
+		t.Fatalf("request counts = %v, want exactly one attempt per job despite --max-attempts 3", counts)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Succeeded != 1 || summary.Failed != 2 {
+		t.Fatalf("summary succeeded/failed = %d/%d, want 1/2", summary.Succeeded, summary.Failed)
+	}
+	first, second, third := summary.Jobs[0], summary.Jobs[1], summary.Jobs[2]
+	if first.Index != 1 || second.Index != 2 || third.Index != 3 {
+		t.Fatalf("summary jobs are not in input order: %+v", summary.Jobs)
+	}
+	if first.OK || first.Status != http.StatusTooManyRequests || !strings.Contains(first.Error, "HTTP 429") {
+		t.Fatalf("429 job result = %+v, want failure with status 429", first)
+	}
+	if !second.OK || len(second.Outputs) != 1 {
+		t.Fatalf("successful job result = %+v, want outputs", second)
+	}
+	if third.OK || third.Status != http.StatusForbidden || !strings.Contains(third.Error, "HTTP 403") {
+		t.Fatalf("403 job result = %+v, want failure with status 403", third)
+	}
+	for _, job := range summary.Jobs {
+		if job.Provider != "openai" || job.Model != "fake-model" {
+			t.Fatalf("job %d Provider/Model = %q/%q, want openai/fake-model", job.Index, job.Provider, job.Model)
+		}
+	}
+}
+
+func TestRunBatch5xxRetriesWithinBoundedAttempts(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var mu sync.Mutex
+	requests := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		requests[payload.Prompt]++
+		mu.Unlock()
+		if payload.Prompt == "server-error" {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeProviderConfig(t, server.URL)
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"server-error\",\"out\":\"one.png\"}\n{\"operation\":\"generate\",\"prompt\":\"succeeds\",\"out\":\"two.png\"}\n")
+	var output bytes.Buffer
+	err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--concurrency", "1", "--max-attempts", "3"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "one or more batch jobs failed") {
+		t.Fatalf("runBatch error = %v, want nonzero batch failure", err)
+	}
+	mu.Lock()
+	flaky, good := requests["server-error"], requests["succeeds"]
+	mu.Unlock()
+	if flaky != 3 || good != 1 {
+		t.Fatalf("request counts = server-error:%d succeeds:%d, want 3 bounded 5xx attempts and 1 success", flaky, good)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Succeeded != 1 || summary.Failed != 1 {
+		t.Fatalf("summary succeeded/failed = %d/%d, want partial success 1/1", summary.Succeeded, summary.Failed)
+	}
+	if summary.Jobs[0].OK || summary.Jobs[0].Status != http.StatusInternalServerError || !strings.Contains(summary.Jobs[0].Error, "HTTP 500") {
+		t.Fatalf("5xx job result = %+v, want failure with status 500 after retries", summary.Jobs[0])
+	}
+	if !summary.Jobs[1].OK || len(summary.Jobs[1].Outputs) != 1 {
+		t.Fatalf("successful job result = %+v, want outputs", summary.Jobs[1])
+	}
+}
