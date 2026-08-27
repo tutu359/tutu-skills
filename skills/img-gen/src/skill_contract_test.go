@@ -28,6 +28,18 @@ func requireDocFragments(t *testing.T, doc string, fragments ...string) {
 	}
 }
 
+func TestProviderReferenceDocumentsOpenAIFactsOnly(t *testing.T) {
+	data, err := os.ReadFile("../references/providers/openai.md")
+	if err != nil {
+		t.Fatalf("read OpenAI Provider reference: %v", err)
+	}
+	doc := string(data)
+	requireDocFragments(t, doc, "# OpenAI Provider", "baseURL", "apiKey", "model", "/v1/images/generations", "/v1/images/edits", "b64_json")
+	if strings.Contains(doc, "IMAGE_API_") || strings.Contains(doc, "--concurrency") || strings.Contains(doc, "chmod +x") {
+		t.Fatal("OpenAI Provider reference duplicates common troubleshooting rules")
+	}
+}
+
 func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 	skill, batch := readSkillContract(t)
 	requireDocFragments(t, skill,
@@ -52,7 +64,7 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"Treat the user's prompt as authoritative",
 		"control plane",
 		"execution plane",
-		"Concurrency priority is `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"Batch concurrency is `--concurrency`, or the CLI default of `5`.",
 		"The CLI preflights every operation",
 		"`--fail-fast` stops scheduling jobs not yet started",
 		"deliver each successful output immediately",
@@ -64,7 +76,7 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"Relative `image` and `mask` paths are resolved",
 		"Relative `out` paths are resolved under the command's `--out-dir`",
 		"The CLI validates every operation",
-		"Concurrency is selected by `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"Concurrency is selected by `--concurrency`, then the default `5`.",
 		"successful files are kept",
 		"process exits nonzero if any job fails",
 	)

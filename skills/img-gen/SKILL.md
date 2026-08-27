@@ -1,6 +1,6 @@
 ---
 name: img-gen
-description: Generate and edit raster images through a configurable OpenAI-compatible Image API. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits through a separately configured API provider.
+description: Generate and edit raster images through the configured OpenAI Provider. Use when the user asks for one or many images, illustrations, product shots, covers, website assets, visual variants, background replacements, object changes, compositing, or other image edits.
 ---
 
 # img-gen
@@ -11,7 +11,26 @@ Generate and edit images with the bundled native macOS and Windows CLI. No Pytho
 
 The Skill is the **control plane**. It faithfully turns the user's request into prompts, one-image tasks, output names, and a single invocation plan. The CLI is the **execution plane**. It owns argument validation, batch preflight, path resolution, API requests, bounded concurrency, retries, file writes, the JSON summary, and exit status.
 
-Keep the normal path fast. Do not search the workspace, inspect attachments, probe configuration, compile, run a dry run, or read reference documents before the first requested operation. Read a reference document only when its details are needed to resolve an unfamiliar format, error, or troubleshooting question.
+Keep the normal path fast. Do not search the workspace, inspect attachments, compile, run a dry run, or read reference documents before the first requested operation. Provider Selection comes only from an explicit `--provider` or the user-level JSON default; never infer it from an API key, endpoint, or Model. Read a reference document only when its details are needed to resolve an unfamiliar format, error, or troubleshooting question.
+
+## Provider Configuration
+
+The CLI reads the user-level JSON file at the operating system's user configuration directory under `tutu-skills/img-gen/config.json`. Its shape is:
+
+```json
+{
+  "defaultProvider": "openai",
+  "providers": {
+    "openai": {
+      "baseURL": "https://api.openai.com",
+      "apiKey": "configured-locally",
+      "model": "gpt-image-1"
+    }
+  }
+}
+```
+
+`baseURL`, `apiKey`, and `model` belong to the selected Provider and are not shared with another Provider. Pass `--provider openai` to select OpenAI for one command and override `defaultProvider`. The CLI ignores all legacy `IMAGE_API_*` environment variables.
 
 ## Fast path
 
@@ -121,13 +140,13 @@ For ordinary batches, write JSONL directly and invoke the launcher once:
   --out-dir "output/imagegen"
 ```
 
-Each non-empty line is one job. Every job must explicitly set `operation` to `generate` or `edit`. Supported fields are `operation`, `prompt`, `out`, `image`, `mask`, `size`, `quality`, and `model`.
+Each non-empty line is one job. Every job must explicitly set `operation` to `generate` or `edit`. Supported fields are `operation`, `provider`, `prompt`, `out`, `image`, `mask`, `size`, `quality`, and `model`. A job-level `provider` overrides the command's provider selection.
 
 - `generate` jobs must not include `image` or `mask` at all. `edit` jobs require an `image` array with at least one path and may include one `mask`.
 - Every job requests exactly one image. Do not include `n` or any single-request multi-image quantity.
 - Relative `image` and `mask` paths resolve from the batch JSONL directory. Relative `out` paths resolve under `--out-dir`; absolute paths remain absolute. Add an extension when needed and use unique output paths.
 - The CLI preflights every operation, prompt, input file, output conflict, and duplicate resolved output before any network request. Do not compensate for preflight with workspace searches or manual checks.
-- Concurrency priority is `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`, then the CLI default of `5`. The worker pool replaces completed jobs immediately.
+- Batch concurrency is `--concurrency`, or the CLI default of `5`. The worker pool replaces completed jobs immediately.
 - By default, a failed job does not stop other jobs. Successful files remain, the summary stays in input order, and the process exits nonzero if any job fails. `--fail-fast` stops scheduling jobs not yet started while already-started jobs finish.
 - The JSON summary identifies each job by `index` and `operation`, and reports successful `outputs` or an `error` reason.
 

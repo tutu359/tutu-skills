@@ -4,11 +4,10 @@ Read this file only after a command fails or when the user asks about configurat
 
 ## Configuration
 
-- Require `IMAGE_API_BASE_URL` or `--base-url`.
-- Require `IMAGE_API_KEY` for network requests. Ask the user to configure it locally; never ask them to paste it into chat.
-- Resolve the model from `--model`, then `IMAGE_API_MODEL`, then `gpt-image-2`.
-- Resolve batch concurrency from `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`, then `5`.
-- Resolve total request attempts from `--max-attempts`, then `IMAGE_API_MAX_ATTEMPTS`, then `3`.
+- Require an explicit `--provider` or `defaultProvider` in the user-level JSON configuration.
+- Require the selected Provider's `baseURL`, `apiKey`, and `model` fields. Ask the user to configure them locally; never ask them to paste an API Key into chat.
+- Provider identity is never inferred from an API Key, endpoint, or Model.
+- Legacy `IMAGE_API_*` environment variables are ignored.
 - Default size and quality to `auto`.
 
 ## Failures

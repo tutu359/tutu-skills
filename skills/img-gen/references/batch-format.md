@@ -9,6 +9,7 @@ The `batch` command reads one JSON object per non-empty line. Every job must exp
 
 ## Common fields
 
+- `provider` is optional per job and overrides the command's Provider Selection. It must be an explicitly supported Provider name.
 - `operation` is required and must be exactly `generate` or `edit`. Missing or unknown operations fail before any network request.
 - `prompt` is required and must be non-empty. The prompt is sent unchanged; the CLI does not interpret image roles or rewrite it.
 - `out` is required and must be unique across both generate and edit jobs.
@@ -45,7 +46,7 @@ The CLI validates every operation, prompt, input file, output path, output confl
 
 ## Concurrency and failures
 
-Concurrency is selected by `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`, then the default `5`. The bounded worker pool replaces a completed job immediately. By default, a failed job does not stop other jobs; successful files are kept, the JSON summary remains in input order, and the process exits nonzero if any job fails. `--fail-fast` stops scheduling jobs that have not started while allowing already-started jobs to finish. The summary includes each job's `operation` and either its successful `outputs` or an `error` reason.
+Concurrency is selected by `--concurrency`, then the default `5`. The bounded worker pool replaces a completed job immediately. By default, a failed job does not stop other jobs; successful files are kept, the JSON summary remains in input order, and the process exits nonzero if any job fails. `--fail-fast` stops scheduling jobs that have not started while allowing already-started jobs to finish. The summary includes each job's `operation` and either its successful `outputs` or an `error` reason.
 
 Run a batch with:
 

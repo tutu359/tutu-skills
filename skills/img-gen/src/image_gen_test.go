@@ -16,6 +16,45 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "img-gen-tests-home-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(home)
+	if err := os.Setenv("HOME", home); err != nil {
+		panic(err)
+	}
+	path, err := configFilePath()
+	if err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		panic(err)
+	}
+	config := `{"defaultProvider":"openai","providers":{"openai":{"baseURL":"http://config.invalid","apiKey":"test-key","model":"gpt-image-2"}}}`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
+
+func writeUserConfig(t *testing.T, contents string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type failingWriter struct {
 	err error
 }
@@ -42,6 +81,77 @@ func TestWriteJSONReturnsWriterError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "could not write JSON output") {
 		t.Fatalf("writeJSON error = %q, want output context", err)
+	}
+}
+
+func TestProviderConfigurationSelectsDefaultAndUsesOpenAIProtocol(t *testing.T) {
+	const png = "aGVsbG8="
+	var authorization, model string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		model = payload.Model
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"openai","providers":{"openai":{"baseURL":%q,"apiKey":"json-key","model":"json-model"}}}`, server.URL))
+	var output bytes.Buffer
+	if err := runGenerate([]string{"--prompt", "configured image", "--out-dir", t.TempDir(), "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runGenerate returned an error: %v", err)
+	}
+	if authorization != "Bearer json-key" {
+		t.Fatalf("Authorization = %q, want JSON Provider Configuration key", authorization)
+	}
+	if model != "json-model" {
+		t.Fatalf("model = %q, want JSON Provider Configuration model", model)
+	}
+	if !strings.Contains(output.String(), `"model": "json-model"`) || !strings.Contains(output.String(), `"provider": "openai"`) {
+		t.Fatalf("success output = %s, want Provider and Model", output.String())
+	}
+}
+
+func TestExplicitProviderOverridesConfiguredDefault(t *testing.T) {
+	const png = "aGVsbG8="
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"openai":{"baseURL":%q,"apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":"http://unused.invalid","apiKey":"google-key","model":"google-model"}}}`, server.URL))
+	var output bytes.Buffer
+	if err := runGenerate([]string{"--provider", "openai", "--prompt", "explicit provider", "--out-dir", t.TempDir(), "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("explicit openai Provider Selection failed: %v", err)
+	}
+	if !strings.Contains(output.String(), `"provider": "openai"`) {
+		t.Fatalf("success output = %s, want openai Provider", output.String())
+	}
+}
+
+func TestProviderSelectionFailsWithoutDefaultOrExplicitProvider(t *testing.T) {
+	writeUserConfig(t, `{"providers":{"openai":{"baseURL":"http://unused.invalid","apiKey":"json-key","model":"json-model"}}}`)
+	t.Setenv("IMAGE_API_BASE_URL", "http://legacy.invalid")
+	t.Setenv("IMAGE_API_KEY", "legacy-key")
+	t.Setenv("IMAGE_API_MODEL", "legacy-model")
+	err := runGenerate([]string{"--prompt", "missing provider", "--out-dir", t.TempDir()}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "no Provider selected") {
+		t.Fatalf("missing Provider error = %v, want clear selection failure", err)
+	}
+}
+
+func TestProviderConfigurationDoesNotFallbackToLegacyEnvironment(t *testing.T) {
+	writeUserConfig(t, ``)
+	t.Setenv("IMAGE_API_BASE_URL", "http://legacy.invalid")
+	t.Setenv("IMAGE_API_KEY", "legacy-key")
+	t.Setenv("IMAGE_API_MODEL", "legacy-model")
+	err := runGenerate([]string{"--provider", "openai", "--prompt", "legacy values", "--base-url", "http://override.invalid"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Fatalf("legacy fallback error = %v, want configuration error", err)
 	}
 }
 
@@ -198,6 +308,74 @@ func TestRunEditRejectsPublicImageCount(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("server received %d requests after rejected arguments, want 0", requests)
+	}
+}
+
+func TestRunBatchUsesExplicitJobProviderAndReportsProviderModel(t *testing.T) {
+	const png = "aGVsbG8="
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"openai":{"baseURL":%q,"apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":"http://unused.invalid","apiKey":"google-key","model":"google-model"}}}`, server.URL))
+	input := writeBatchInput(t, `{"operation":"generate","provider":"openai","prompt":"batch image","out":"batch.png"}`+"\n")
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--concurrency", "1", "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runBatch returned an error: %v", err)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Jobs[0].Provider != "openai" || summary.Jobs[0].Model != "openai-model" {
+		t.Fatalf("batch Provider/Model = %q/%q, want openai/openai-model", summary.Jobs[0].Provider, summary.Jobs[0].Model)
+	}
+}
+
+func TestRunBatchCommandProviderAppliesToJobsWithoutJobProvider(t *testing.T) {
+	const png = "aGVsbG8="
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"openai":{"baseURL":%q,"apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":"http://unused.invalid","apiKey":"google-key","model":"google-model"}}}`, server.URL))
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"command provider\",\"out\":\"one.png\"}\n")
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--concurrency", "1", "--max-attempts", "1", "--provider", "openai"}, &output); err != nil {
+		t.Fatalf("runBatch with command-level Provider Selection failed: %v", err)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Jobs[0].Provider != "openai" || summary.Jobs[0].Model != "openai-model" {
+		t.Fatalf("batch Provider/Model = %q/%q, want command-level openai/openai-model", summary.Jobs[0].Provider, summary.Jobs[0].Model)
+	}
+}
+
+func TestRunBatchJobModelOverrideReachesRequest(t *testing.T) {
+	const png = "aGVsbG8="
+	var model string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		model = payload.Model
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, png)
+	}))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"openai","providers":{"openai":{"baseURL":%q,"apiKey":"json-key","model":"json-model"}}}`, server.URL))
+	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"job model\",\"model\":\"job-model\",\"out\":\"one.png\"}\n")
+	var output bytes.Buffer
+	if err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--concurrency", "1", "--max-attempts", "1"}, &output); err != nil {
+		t.Fatalf("runBatch returned an error: %v", err)
+	}
+	if model != "job-model" {
+		t.Fatalf("request model = %q, want job-level override job-model", model)
+	}
+	summary := decodeBatchSummary(t, &output)
+	if summary.Jobs[0].Model != "job-model" {
+		t.Fatalf("summary model = %q, want job-model", summary.Jobs[0].Model)
 	}
 }
 
@@ -442,7 +620,7 @@ func mustAbs(t *testing.T, path string) string {
 	return absolute
 }
 
-func TestRunBatchConcurrencyConfigPriority(t *testing.T) {
+func TestRunBatchConcurrencyIgnoresLegacyEnvironment(t *testing.T) {
 	t.Setenv("IMAGE_API_BATCH_CONCURRENCY", "2")
 	input := writeBatchInput(t, "{\"operation\":\"generate\",\"prompt\":\"one\",\"out\":\"one.png\"}\n")
 	for _, tc := range []struct {
@@ -450,7 +628,7 @@ func TestRunBatchConcurrencyConfigPriority(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"environment", nil, 2},
+		{"default", nil, 5},
 		{"command line", []string{"--concurrency", "3"}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
