@@ -15,7 +15,9 @@ Keep the normal path fast. Do not search the workspace, inspect attachments, com
 
 ## Provider Configuration
 
-The CLI reads the user-level JSON file at the operating system's user configuration directory under `tutu-skills/img-gen/config.json`. Its shape is:
+The CLI reads the user-level JSON file at the operating system's user configuration directory under `tutu-skills/img-gen/config.json`. If a task reports missing or unusable Provider Configuration, run `<img-gen> init` after the failed task to create a user-level template, fill its Provider credentials locally, and retry the original task. Initialization never prints credential values and refuses to overwrite an existing file unless `--force` is passed. The template covers both supported Providers. Its shape is:
+
+The newly created template leaves each `apiKey` empty for the user to fill locally; the completed configuration has this shape (credential values are never requested in chat):
 
 ```json
 {
@@ -23,12 +25,12 @@ The CLI reads the user-level JSON file at the operating system's user configurat
   "providers": {
     "openai": {
       "baseURL": "https://api.openai.com",
-      "apiKey": "configured-locally",
+      "apiKey": "",
       "model": "gpt-image-1"
     },
     "google": {
       "baseURL": "https://generativelanguage.googleapis.com",
-      "apiKey": "configured-locally",
+      "apiKey": "",
       "model": "imagen-3.0-generate-002"
     }
   }
@@ -198,13 +200,14 @@ Use the requested orientation or infer it from the asset. Pass the requested dim
 ## Configuration and failures
 
 - Execute the requested command first. Let the CLI report missing configuration or invalid arguments instead of probing in advance.
+- If the failed command reports missing or unusable Provider Configuration, run `<img-gen> init`, complete the generated template locally, and retry; do not paste credentials into chat.
 - Never print or request API keys in chat.
 - Use `--dry-run` only when validation is requested or needed to diagnose an argument problem.
 - Do not overwrite files unless the user authorizes it and `--force` is passed.
 - Native transparent output is not guaranteed.
 - On a failed batch, report the CLI summary and error reasons, retain and deliver successful outputs, and do not inspect or visually retry them unless the user asks for troubleshooting.
 
-Read [references/troubleshooting.md](references/troubleshooting.md) only after a configuration, permission, retry, timeout, or provider error.
+Read [references/troubleshooting.md](references/troubleshooting.md) first after every failure. Read a Provider reference only after the common troubleshooting guidance when a configuration, Model, Base URL, protocol, or Provider-specific error fact is still needed.
 
 ## Finish
 

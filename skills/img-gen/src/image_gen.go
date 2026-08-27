@@ -95,6 +95,10 @@ func configFilePath() (string, error) {
 	return filepath.Join(dir, "tutu-skills", "img-gen", "config.json"), nil
 }
 
+func initializationGuidance(path, problem string) error {
+	return fmt.Errorf("%s; run `img-gen init` to create a user-level template at %s, fill the provider credentials locally, and retry", problem, path)
+}
+
 func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
 	path, err := configFilePath()
 	if err != nil {
@@ -103,30 +107,30 @@ func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return args, fmt.Errorf("img-gen Provider Configuration is missing at %s; create it with defaultProvider and providers.<provider>.baseURL, apiKey, and model, then retry", path)
+			return args, initializationGuidance(path, "img-gen Provider Configuration is missing")
 		}
-		return args, fmt.Errorf("could not read img-gen Provider Configuration %s: %w", path, err)
+		return args, initializationGuidance(path, fmt.Sprintf("could not read img-gen Provider Configuration %s", path))
 	}
 	var config userConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return args, fmt.Errorf("img-gen Provider Configuration %s is invalid JSON: %w", path, err)
+		return args, initializationGuidance(path, fmt.Sprintf("img-gen Provider Configuration %s is invalid JSON: %v", path, err))
 	}
 	provider := strings.TrimSpace(explicit)
 	if provider == "" {
 		provider = strings.TrimSpace(config.DefaultProvider)
 	}
 	if provider == "" {
-		return args, fmt.Errorf("no Provider selected; pass --provider or set defaultProvider in %s", path)
+		return args, initializationGuidance(path, "no Provider selected; pass --provider or set defaultProvider")
 	}
 	if provider != "openai" && provider != "google" {
 		return args, fmt.Errorf("unsupported Provider %q; supported Providers: openai, google", provider)
 	}
 	selected, ok := config.Providers[provider]
 	if !ok {
-		return args, fmt.Errorf("Provider Configuration for %q is missing in %s", provider, path)
+		return args, initializationGuidance(path, fmt.Sprintf("Provider Configuration for %q is missing", provider))
 	}
 	if strings.TrimSpace(selected.BaseURL) == "" || strings.TrimSpace(selected.APIKey) == "" || strings.TrimSpace(selected.Model) == "" {
-		return args, fmt.Errorf("Provider Configuration for %q must include non-empty baseURL, apiKey, and model in %s", provider, path)
+		return args, initializationGuidance(path, fmt.Sprintf("Provider Configuration for %q is incomplete", provider))
 	}
 	args.provider = provider
 	args.baseURL = strings.TrimSpace(selected.BaseURL)
@@ -136,6 +140,72 @@ func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
 	args.apiKey = strings.TrimSpace(selected.APIKey)
 	args.model = strings.TrimSpace(selected.Model)
 	return args, nil
+}
+
+func templateConfig() userConfig {
+	return userConfig{
+		DefaultProvider: "openai",
+		Providers: map[string]providerConfig{
+			"openai": {
+				BaseURL: "https://api.openai.com",
+				Model:   "gpt-image-1",
+			},
+			"google": {
+				BaseURL: "https://generativelanguage.googleapis.com",
+				Model:   "imagen-3.0-generate-002",
+			},
+		},
+	}
+}
+
+func writeConfigTemplate(force bool) (string, error) {
+	path, err := configFilePath()
+	if err != nil {
+		return "", err
+	}
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return "", fmt.Errorf("img-gen Provider Configuration already exists at %s; refusing to overwrite it", path)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("could not inspect img-gen Provider Configuration %s: %w", path, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("could not create user configuration directory: %w", err)
+	}
+	data, err := json.MarshalIndent(templateConfig(), "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("could not encode Provider Configuration template: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return "", fmt.Errorf("could not write Provider Configuration template: %w", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return "", fmt.Errorf("could not secure Provider Configuration template: %w", err)
+	}
+	return path, nil
+}
+
+func runInit(argv []string, output io.Writer) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	force := false
+	fs.BoolVar(&force, "force", false, "replace an existing user-level Provider Configuration template")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("init does not accept positional arguments")
+	}
+	path, err := writeConfigTemplate(force)
+	if err != nil {
+		return err
+	}
+	return writeJSON(output, map[string]any{
+		"created": true,
+		"path":    path,
+		"message": "Provider Configuration template created; fill the provider credentials locally before running an image task",
+	})
 }
 
 func validateCommon(args commonArgs) error {
@@ -714,7 +784,7 @@ func runGenerate(argv []string, output io.Writer) error {
 	var err error
 	args, err = selectProvider(args, args.provider)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	finalPrompt, err := promptValue(prompt, promptFile)
 	if err != nil {
@@ -743,7 +813,7 @@ func runEdit(argv []string, output io.Writer) error {
 	var err error
 	args, err = selectProvider(args, args.provider)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	if len(images) == 0 {
 		return reportFailure(output, args, errors.New("provide at least one --image"))
@@ -1088,7 +1158,7 @@ func runBatch(argv []string, output io.Writer) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: img-gen <generate|edit|batch> [options]")
+	fmt.Fprintln(os.Stderr, "Usage: img-gen <init|generate|edit|batch> [options]")
 }
 
 func main() {
@@ -1098,6 +1168,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "init":
+		err = runInit(os.Args[2:], os.Stdout)
 	case "generate":
 		err = runGenerate(os.Args[2:], os.Stdout)
 	case "edit":

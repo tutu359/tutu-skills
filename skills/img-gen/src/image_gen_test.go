@@ -85,6 +85,99 @@ func TestWriteJSONReturnsWriterError(t *testing.T) {
 	}
 }
 
+func TestInitCreatesUserTemplateForBothProvidersWithoutEchoingSecrets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var output bytes.Buffer
+	if err := runInit(nil, &output); err != nil {
+		t.Fatalf("runInit returned an error: %v", err)
+	}
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("configuration template was not created: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("configuration permissions = %o, want 600", info.Mode().Perm())
+	}
+	var config userConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("decode configuration template: %v", err)
+	}
+	if config.DefaultProvider != "openai" {
+		t.Fatalf("defaultProvider = %q, want openai", config.DefaultProvider)
+	}
+	for _, provider := range []string{"openai", "google"} {
+		selected, ok := config.Providers[provider]
+		if !ok {
+			t.Fatalf("configuration template is missing %q", provider)
+		}
+		if selected.BaseURL == "" || selected.Model == "" || selected.APIKey != "" {
+			t.Fatalf("%s template configuration = %+v, want baseURL/model and empty apiKey", provider, selected)
+		}
+	}
+	if strings.Contains(output.String(), "apiKey") || strings.Contains(output.String(), "secret") {
+		t.Fatalf("initialization output exposed configuration details: %s", output.String())
+	}
+	if !strings.Contains(output.String(), path) || !strings.Contains(output.String(), "fill") {
+		t.Fatalf("initialization output = %s, want path and local fill guidance", output.String())
+	}
+}
+
+func TestInitRefusesToOverwriteExistingConfigurationByDefault(t *testing.T) {
+	contents := `{"defaultProvider":"google","providers":{"google":{"baseURL":"https://example.invalid","apiKey":"local-only","model":"example-model"}}}`
+	writeUserConfig(t, contents)
+	var output bytes.Buffer
+	err := runInit(nil, &output)
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("runInit error = %v, want overwrite refusal", err)
+	}
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != contents {
+		t.Fatalf("existing Provider Configuration changed: %s", data)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("failed initialization wrote output: %s", output.String())
+	}
+}
+
+func TestMissingConfigurationProvidesInitializationGuidanceWithoutNetwork(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	err := runGenerate([]string{"--provider", "openai", "--base-url", server.URL, "--prompt", "missing configuration"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "img-gen init") {
+		t.Fatalf("runGenerate error = %v, want initialization command guidance", err)
+	}
+	if requests != 0 {
+		t.Fatalf("server received %d requests with missing configuration, want 0", requests)
+	}
+	if strings.Contains(output.String(), "apiKey") || strings.Contains(output.String(), "API Key") {
+		t.Fatalf("missing configuration output exposed a key field: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "img-gen init") || !strings.Contains(output.String(), "fill") {
+		t.Fatalf("missing configuration output = %s, want safe initialization guidance", output.String())
+	}
+}
+
 func TestProviderConfigurationSelectsDefaultAndUsesOpenAIProtocol(t *testing.T) {
 	const png = "aGVsbG8="
 	var authorization, model string
