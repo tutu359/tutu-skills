@@ -102,7 +102,7 @@ Instructions:
 
 ## SubAgent--SubAgent
 
-子代理可以按需要创建后代代理，如tdd、code-review等，但必须：
+子代理可以按需要创建后代代理，code review 必须由独立子代理并使用技能 /code-review 完成，但必须：
 
 - 明确后代代理的任务范围；
 - 由自己接收和整理后代结果；
@@ -124,7 +124,7 @@ references/implement-skill.md
 - Ticket 要求的代码实现已实现；
 - 必要的单元测试或集成测试已完成；
 - 类型检查已完成；
-- code review已完成；
+- code review 已通过独立子代理并使用/code-review 技能完成；
 - 子代理完成 Ticket 后必须提交 commit。
 - 所有后代代理都已结束或停止。
 - 向父代理返回规定格式的完成报告或阻塞报告。
@@ -152,7 +152,7 @@ references/implement-skill.md
 - 实现与检查摘要：
   - <实现摘要>
   - <测试摘要>
-  - <code review 摘要>
+  - <子代理code review 摘要>
 - 后代代理状态：全部已结束或停止
 ```
 
