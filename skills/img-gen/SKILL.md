@@ -11,7 +11,17 @@ Generate and edit images with the bundled native macOS and Windows CLI. No Pytho
 
 The Skill is the **control plane**. It faithfully turns the user's request into prompts, one-image tasks, output names, and a single invocation plan. The CLI is the **execution plane**. It owns argument validation, batch preflight, path resolution, API requests, bounded concurrency, retries, file writes, the JSON summary, and exit status.
 
-Keep the normal path fast. Do not search the workspace, inspect attachments, compile, run a dry run, or read reference documents before the first requested operation. Provider Selection comes only from an explicit `--provider` or the user-level JSON default; never infer it from an API key, endpoint, or Model. Read a reference document only when its details are needed to resolve an unfamiliar format, error, or troubleshooting question.
+Keep the normal path fast. Normal `generate`, `edit`, and `batch` tasks do not read any reference document before the requested operation. Do not search the workspace, inspect attachments, compile, run a dry run, or do any reference-driven preflight. Do not pre-check configuration; let the CLI validate it while executing the requested command. Provider Selection comes only from an explicit `--provider` or the user-level JSON default; never infer it from an API key, endpoint, or Model.
+
+## Progressive reference disclosure
+
+References are opened only as needed, in this order:
+
+1. **Success:** A normal `generate`, `edit`, or `batch` succeeds without reading troubleshooting or a Provider reference.
+2. **Any failure:** Read [references/troubleshooting.md](references/troubleshooting.md) first after every failure and use it to handle common configuration, permission, network, timeout, retry, batch, and API Key safety concerns.
+3. **Provider-specific follow-up:** If common troubleshooting resolves the failure, stop there and do not read a Provider reference. If the failure still requires a Provider-specific configuration, Model, Base URL, protocol, or error fact, read the relevant Provider reference. Read only the current Provider's reference for that unresolved fact. OpenAI failures read only `references/providers/openai.md`; Google failures read only `references/providers/google.md`.
+
+Provider references describe only their Provider's protocol and configuration facts. They do not replace or repeat common troubleshooting rules.
 
 ## Provider Configuration
 

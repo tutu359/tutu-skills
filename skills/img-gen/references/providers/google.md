@@ -1,6 +1,6 @@
 # Google Provider
 
-This reference records facts specific to the Google Provider. Consult it after the general failure guidance when a command fails.
+This reference records only Google-specific configuration, Model, Base URL, protocol, and error facts. Read it only after shared failure guidance leaves one of those facts unresolved; do not use it for common failure rules.
 
 ## Provider Configuration
 

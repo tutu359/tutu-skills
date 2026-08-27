@@ -19,7 +19,7 @@ This is the first reference after every failed `generate`, `edit`, or `batch` co
 
 ## Network, timeout, and retry
 
-- The CLI retries network failures, timeouts, and HTTP `5xx` failures with bounded backoff. It honors a valid `Retry-After` header, capped at 30 seconds.
+- The CLI retries network failures, timeouts, and all HTTP `5xx` failures with bounded backoff. It honors a valid `Retry-After` header, capped at 30 seconds.
 - Do not retry any `4xx` response, including `429`, authentication, validation, policy, or ordinary request errors.
 - On a repeated timeout, check the selected Provider's Base URL and network access, then try lower quality, a square size, fewer concurrent batch jobs, or a later retry. Do not silently change Provider or Model.
 - Never expose authorization headers, API Keys, or full API response bodies. Error output contains only a safe status or message.

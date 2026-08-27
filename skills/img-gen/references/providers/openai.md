@@ -1,6 +1,6 @@
 # OpenAI Provider
 
-This reference records facts specific to the OpenAI Provider. Use the common troubleshooting reference first when a command fails.
+This reference records only OpenAI-specific configuration, Model, Base URL, protocol, and error facts. Read it only after shared failure guidance leaves one of those facts unresolved; do not use it for common failure rules.
 
 ## Provider Configuration
 
