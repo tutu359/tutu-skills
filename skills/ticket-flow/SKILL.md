@@ -96,14 +96,16 @@ Instructions:
 3. 核对当前分支；
 4. 核对基线 commit；
 5. 核对当前工作目录是主代理指定的 Ticket worktree；
-6. 读取 `references/implement-skill.md`。
+6. 读取 `references/implement-skill.md`;
+7. 严格按照 `references/implement-skill.md` 中的步骤实现。
 
 发现任何不一致时，子代理必须先向主代理报告，不得直接开始修改代码。
 
 ## SubAgent--SubAgent
 
-子代理可以按需要创建后代代理，code review 必须由独立子代理并使用技能 /code-review 完成，但必须：
+子代理可以按需要创建后代代理，但必须：
 
+- Ticket子代理在完成工作后，必须阅读`/code-review`技能，按照此技能的要求，派发Code Review独立后代子代理;
 - 明确后代代理的任务范围；
 - 由自己接收和整理后代结果；
 - 负责处理后代调用失败；
@@ -124,7 +126,7 @@ references/implement-skill.md
 - Ticket 要求的代码实现已实现；
 - 必要的单元测试或集成测试已完成；
 - 类型检查已完成；
-- code review 已通过独立子代理并使用/code-review 技能完成；
+- code review 已通过独立子代理完成；
 - 子代理完成 Ticket 后必须提交 commit。
 - 所有后代代理都已结束或停止。
 - 向父代理返回规定格式的完成报告或阻塞报告。
