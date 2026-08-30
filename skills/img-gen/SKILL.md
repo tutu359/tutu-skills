@@ -41,7 +41,7 @@ The newly created template leaves each `apiKey` empty for the user to fill local
     "google": {
       "baseURL": "https://generativelanguage.googleapis.com",
       "apiKey": "",
-      "model": "imagen-3.0-generate-002"
+      "model": "gemini-3.1-flash-image"
     }
   }
 }

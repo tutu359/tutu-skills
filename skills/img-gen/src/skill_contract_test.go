@@ -46,7 +46,7 @@ func TestProviderReferenceDocumentsGoogleFactsOnly(t *testing.T) {
 		t.Fatalf("read Google Provider reference: %v", err)
 	}
 	doc := string(data)
-	requireDocFragments(t, doc, "# Google Provider", "baseURL", "apiKey", "model", "/v1beta/models/<model>:predict", "instances", "predictions", "bytesBase64Encoded")
+	requireDocFragments(t, doc, "# Google Provider", "baseURL", "apiKey", "model", "/v1beta/models/<model>:generateContent", "contents", "candidates", "inlineData", "responseModalities")
 	if strings.Contains(doc, "IMAGE_API_") || strings.Contains(doc, "--concurrency") || strings.Contains(doc, "chmod +x") || strings.Contains(doc, "common troubleshooting") {
 		t.Fatal("Google Provider reference duplicates common troubleshooting rules")
 	}
@@ -108,7 +108,7 @@ func TestSkillDocumentsDeclareProgressiveReferenceDisclosure(t *testing.T) {
 
 func TestSkillDocumentsDeclareGoogleProviderContract(t *testing.T) {
 	skill, _ := readSkillContract(t)
-	requireDocFragments(t, skill, "OpenAI or Google Provider", `"google":`, "imagen-3.0-generate-002")
+	requireDocFragments(t, skill, "OpenAI or Google Provider", `"google":`, "gemini-3.1-flash-image")
 }
 
 func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -152,7 +153,7 @@ func templateConfig() userConfig {
 			},
 			"google": {
 				BaseURL: "https://generativelanguage.googleapis.com",
-				Model:   "imagen-3.0-generate-002",
+				Model:   "gemini-3.1-flash-image",
 			},
 		},
 	}
@@ -449,7 +450,7 @@ func googleEndpoint(base, model string) string {
 	if !strings.HasSuffix(base, "/v1beta") {
 		base += "/v1beta"
 	}
-	return base + "/models/" + url.PathEscape(model) + ":predict"
+	return base + "/models/" + url.PathEscape(model) + ":generateContent"
 }
 
 func googleRequestURL(endpoint, key string) (string, error) {
@@ -465,66 +466,84 @@ func googleRequestURL(endpoint, key string) (string, error) {
 
 func googlePayload(prompt string) map[string]any {
 	return map[string]any{
-		"instances":  []map[string]any{{"prompt": prompt}},
-		"parameters": map[string]any{"sampleCount": 1},
+		"contents": []map[string]any{{
+			"parts": []map[string]any{{"text": prompt}},
+		}},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"IMAGE"},
+		},
 	}
 }
 
 func decodeGoogleResponse(raw []byte) ([][]byte, error) {
 	var result struct {
-		Predictions []struct {
-			BytesBase64Encoded string `json:"bytesBase64Encoded"`
-		} `json:"predictions"`
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData struct {
+						Data string `json:"data"`
+					} `json:"inlineData"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, errors.New("Google API returned invalid JSON")
 	}
-	if len(result.Predictions) == 0 {
+	if len(result.Candidates) == 0 {
 		return nil, errors.New("Google API response contains no image data")
 	}
-	images := make([][]byte, 0, len(result.Predictions))
-	for _, prediction := range result.Predictions {
-		if prediction.BytesBase64Encoded == "" {
-			return nil, errors.New("Google API image entry contains no bytesBase64Encoded data")
+	var encoded string
+	imageCount := 0
+	for _, part := range result.Candidates[0].Content.Parts {
+		if part.InlineData.Data != "" {
+			imageCount++
+			encoded = part.InlineData.Data
 		}
-		data, err := base64.StdEncoding.DecodeString(prediction.BytesBase64Encoded)
-		if err != nil {
-			return nil, errors.New("Google API returned invalid base64 image data")
-		}
-		images = append(images, data)
 	}
-	return images, nil
+	if imageCount == 0 {
+		return nil, errors.New("Google API response contains no image data")
+	}
+	if imageCount != 1 {
+		return nil, fmt.Errorf("Google API response contains %d images; expected exactly one", imageCount)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, errors.New("Google API returned invalid base64 image data")
+	}
+	return [][]byte{data}, nil
 }
 
-func googleImagesPayload(prompt string, imagePaths []string, mask string) (map[string]any, error) {
-	encodedImages := make([]string, len(imagePaths))
-	for i, path := range imagePaths {
+func googleImageMIME(path string, data []byte) string {
+	if mediaType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); strings.HasPrefix(mediaType, "image/") {
+		return mediaType
+	}
+	if mediaType := http.DetectContentType(data); strings.HasPrefix(mediaType, "image/") {
+		return mediaType
+	}
+	return "application/octet-stream"
+}
+
+func googleImagesPayload(prompt string, imagePaths []string) (map[string]any, error) {
+	parts := make([]map[string]any, 0, len(imagePaths)+1)
+	parts = append(parts, map[string]any{"text": prompt})
+	for _, path := range imagePaths {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("could not read input image: %w", err)
 		}
-		encodedImages[i] = base64.StdEncoding.EncodeToString(data)
-	}
-	instance := map[string]any{"prompt": prompt}
-	if len(encodedImages) == 1 {
-		instance["image"] = map[string]string{"bytesBase64Encoded": encodedImages[0]}
-	} else {
-		images := make([]map[string]string, len(encodedImages))
-		for i, encoded := range encodedImages {
-			images[i] = map[string]string{"bytesBase64Encoded": encoded}
-		}
-		instance["images"] = images
-	}
-	if mask != "" {
-		data, err := os.ReadFile(mask)
-		if err != nil {
-			return nil, fmt.Errorf("could not read mask: %w", err)
-		}
-		instance["mask"] = map[string]any{"image": map[string]string{"bytesBase64Encoded": base64.StdEncoding.EncodeToString(data)}}
+		parts = append(parts, map[string]any{
+			"inlineData": map[string]string{
+				"mimeType": googleImageMIME(path, data),
+				"data":     base64.StdEncoding.EncodeToString(data),
+			},
+		})
 	}
 	return map[string]any{
-		"instances":  []map[string]any{instance},
-		"parameters": map[string]any{"sampleCount": 1},
+		"contents": []map[string]any{{"parts": parts}},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"IMAGE"},
+		},
 	}, nil
 }
 
@@ -619,6 +638,9 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 		return nil, err
 	}
 	if args.provider == "google" {
+		if strings.TrimSpace(mask) != "" {
+			return nil, errors.New("mask is not supported with the Google Provider")
+		}
 		return googleEdit(prompt, imagePaths, mask, out, args)
 	}
 	for _, path := range append(append([]string{}, imagePaths...), mask) {
@@ -713,7 +735,7 @@ func googleEdit(prompt string, imagePaths []string, mask, out string, args commo
 	if err := checkOutputs(paths, args.force); err != nil {
 		return nil, err
 	}
-	payload, err := googleImagesPayload(prompt, imagePaths, mask)
+	payload, err := googleImagesPayload(prompt, imagePaths)
 	if err != nil {
 		return nil, err
 	}
@@ -1044,6 +1066,9 @@ func runBatch(argv []string, output io.Writer) error {
 		jobArgs = batchJobArgs(*job, jobArgs)
 		if err := validateCommon(jobArgs); err != nil {
 			return fmt.Errorf("batch line %d is invalid: %w", i+1, err)
+		}
+		if job.Operation == "edit" && jobArgs.provider == "google" && strings.TrimSpace(job.Mask) != "" {
+			return fmt.Errorf("batch line %d is invalid: mask is not supported with the Google Provider", i+1)
 		}
 		if job.Operation == "edit" {
 			for imageIndex, image := range job.Images {

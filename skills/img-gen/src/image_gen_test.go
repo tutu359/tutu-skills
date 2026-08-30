@@ -123,6 +123,9 @@ func TestInitCreatesUserTemplateForBothProvidersWithoutEchoingSecrets(t *testing
 			t.Fatalf("%s template configuration = %+v, want baseURL/model and empty apiKey", provider, selected)
 		}
 	}
+	if got := config.Providers["google"].Model; got != "gemini-3.1-flash-image" {
+		t.Fatalf("Google template model = %q, want gemini-3.1-flash-image", got)
+	}
 	if strings.Contains(output.String(), "apiKey") || strings.Contains(output.String(), "secret") {
 		t.Fatalf("initialization output exposed configuration details: %s", output.String())
 	}
@@ -1080,16 +1083,18 @@ func TestGoogleProviderUsesGoogleProtocolAndConfiguration(t *testing.T) {
 	const png = "aGVsbG8="
 	var authorization string
 	var payload struct {
-		Instances []struct {
-			Prompt string `json:"prompt"`
-		} `json:"instances"`
-		Parameters struct {
-			SampleCount int `json:"sampleCount"`
-		} `json:"parameters"`
+		Contents []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+		GenerationConfig struct {
+			ResponseModalities []string `json:"responseModalities"`
+		} `json:"generationConfig"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1beta/models/google-imagen:predict" {
-			t.Errorf("Google request path = %q, want /v1beta/models/google-imagen:predict", r.URL.Path)
+		if r.URL.Path != "/v1beta/models/google-imagen:generateContent" {
+			t.Errorf("Google request path = %q, want /v1beta/models/google-imagen:generateContent", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("key"); got != "google-key" {
 			t.Errorf("Google API key query = %q, want google-key", got)
@@ -1099,7 +1104,7 @@ func TestGoogleProviderUsesGoogleProtocolAndConfiguration(t *testing.T) {
 			t.Errorf("decode Google request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+		fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"data":%q}}]}}]}`, png)
 	}))
 	defer server.Close()
 	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"openai":{"baseURL":"http://openai.invalid","apiKey":"openai-key","model":"openai-model"},"google":{"baseURL":%q,"apiKey":"google-key","model":"google-imagen"}}}`, server.URL))
@@ -1111,11 +1116,11 @@ func TestGoogleProviderUsesGoogleProtocolAndConfiguration(t *testing.T) {
 	if authorization != "" {
 		t.Fatalf("Google request sent Authorization header %q", authorization)
 	}
-	if len(payload.Instances) != 1 || payload.Instances[0].Prompt != "a Google image" {
-		t.Fatalf("Google instances = %+v, want one unchanged prompt", payload.Instances)
+	if len(payload.Contents) != 1 || len(payload.Contents[0].Parts) != 1 || payload.Contents[0].Parts[0].Text != "a Google image" {
+		t.Fatalf("Google contents = %+v", payload.Contents)
 	}
-	if payload.Parameters.SampleCount != 1 {
-		t.Fatalf("Google sampleCount = %d, want 1", payload.Parameters.SampleCount)
+	if len(payload.GenerationConfig.ResponseModalities) != 1 || payload.GenerationConfig.ResponseModalities[0] != "IMAGE" {
+		t.Fatalf("Google responseModalities = %+v", payload.GenerationConfig.ResponseModalities)
 	}
 	var result struct {
 		Provider string   `json:"provider"`
@@ -1126,67 +1131,130 @@ func TestGoogleProviderUsesGoogleProtocolAndConfiguration(t *testing.T) {
 		t.Fatalf("decode Google output: %v", err)
 	}
 	if result.Provider != "google" || result.Model != "google-imagen" || len(result.Outputs) != 1 {
-		t.Fatalf("Google result = %+v, want provider/model and one output", result)
+		t.Fatalf("Google result = %+v", result)
 	}
 	if data, err := os.ReadFile(result.Outputs[0]); err != nil || string(data) != "hello" {
 		t.Fatalf("Google output data = %q, read error = %v, want hello", data, err)
 	}
 }
 
-func TestGoogleProviderEditUsesJSONImageProtocol(t *testing.T) {
+func TestGoogleProviderEditUsesOrderedInlineDataParts(t *testing.T) {
 	const png = "aGVsbG8="
 	root := t.TempDir()
-	input := filepath.Join(root, "input.png")
-	mask := filepath.Join(root, "mask.png")
-	if err := os.WriteFile(input, []byte("input image"), 0644); err != nil {
+	first := filepath.Join(root, "first.png")
+	second := filepath.Join(root, "second.jpg")
+	if err := os.WriteFile(first, []byte("first image"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(mask, []byte("mask image"), 0644); err != nil {
+	if err := os.WriteFile(second, []byte("second image"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {
-		Instances []struct {
-			Prompt string `json:"prompt"`
-			Image  struct {
-				Bytes string `json:"bytesBase64Encoded"`
-			} `json:"image"`
-			Mask struct {
-				Image struct {
-					Bytes string `json:"bytesBase64Encoded"`
-				} `json:"image"`
-			} `json:"mask"`
-		} `json:"instances"`
+		Contents []struct {
+			Parts []struct {
+				Text       string `json:"text"`
+				InlineData struct {
+					MIME string `json:"mimeType"`
+					Data string `json:"data"`
+				} `json:"inlineData"`
+			} `json:"parts"`
+		} `json:"contents"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1beta/models/google-editor:predict" {
-			t.Errorf("Google edit path = %q, want /v1beta/models/google-editor:predict", r.URL.Path)
+		if r.URL.Path != "/v1beta/models/google-editor:generateContent" {
+			t.Errorf("Google edit path = %q", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("key"); got != "google-edit-key" {
-			t.Errorf("Google edit API key query = %q, want google-edit-key", got)
+		if r.URL.Query().Get("key") != "google-edit-key" {
+			t.Errorf("Google edit API key = %q", r.URL.Query().Get("key"))
 		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Errorf("Google edit sent Authorization header %q", got)
+		if r.Header.Get("Authorization") != "" {
+			t.Error("Google edit sent Authorization header")
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode Google edit request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+		fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"data":%q}}]}}]}`, png)
 	}))
 	defer server.Close()
 	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"google-edit-key","model":"google-editor"}}}`, server.URL))
 	var output bytes.Buffer
-	if err := runEdit([]string{"--image", input, "--mask", mask, "--prompt", "edit with Google", "--out-dir", filepath.Join(root, "out"), "--max-attempts", "1"}, &output); err != nil {
+	if err := runEdit([]string{"--image", first, "--image", second, "--prompt", "edit with Google", "--out-dir", filepath.Join(root, "out"), "--max-attempts", "1"}, &output); err != nil {
 		t.Fatalf("runEdit returned an error: %v", err)
 	}
-	if len(payload.Instances) != 1 || payload.Instances[0].Prompt != "edit with Google" {
-		t.Fatalf("Google edit instances = %+v, want one unchanged prompt", payload.Instances)
+	if len(payload.Contents) != 1 || len(payload.Contents[0].Parts) != 3 {
+		t.Fatalf("Google edit parts = %+v", payload.Contents)
 	}
-	if payload.Instances[0].Image.Bytes != base64.StdEncoding.EncodeToString([]byte("input image")) {
-		t.Fatalf("Google edit image bytes = %q", payload.Instances[0].Image.Bytes)
+	parts := payload.Contents[0].Parts
+	if parts[0].Text != "edit with Google" || parts[1].InlineData.Data != base64.StdEncoding.EncodeToString([]byte("first image")) || parts[2].InlineData.Data != base64.StdEncoding.EncodeToString([]byte("second image")) {
+		t.Fatalf("Google edit parts = %+v", parts)
 	}
-	if payload.Instances[0].Mask.Image.Bytes != base64.StdEncoding.EncodeToString([]byte("mask image")) {
-		t.Fatalf("Google edit mask bytes = %q", payload.Instances[0].Mask.Image.Bytes)
+	if parts[1].InlineData.MIME != "image/png" || parts[2].InlineData.MIME != "image/jpeg" {
+		t.Fatalf("Google edit mime types = %q, %q", parts[1].InlineData.MIME, parts[2].InlineData.MIME)
+	}
+}
+
+func TestGoogleProviderRejectsMaskBeforeNetwork(t *testing.T) {
+	root := t.TempDir()
+	input, mask := filepath.Join(root, "input.png"), filepath.Join(root, "mask.png")
+	os.WriteFile(input, []byte("input"), 0644)
+	os.WriteFile(mask, []byte("mask"), 0644)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("Google received masked edit") }))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"key","model":"model"}}}`, server.URL))
+	err := runEdit([]string{"--image", input, "--mask", mask, "--prompt", "masked", "--max-attempts", "1"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "mask is not supported with the Google Provider") {
+		t.Fatalf("mask error = %v", err)
+	}
+}
+
+func TestGoogleBatchRejectsMaskDuringPreflight(t *testing.T) {
+	input := writeBatchInput(t, `{"operation":"edit","prompt":"masked batch","image":["input.png"],"mask":"mask.png","out":"out.png"}`+"\n")
+	batchDir := filepath.Dir(input)
+	if err := os.WriteFile(filepath.Join(batchDir, "input.png"), []byte("input"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(batchDir, "mask.png"), []byte("mask"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("Google received masked batch edit") }))
+	defer server.Close()
+	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"key","model":"model"}}}`, server.URL))
+	err := runBatch([]string{"--input", input, "--out-dir", t.TempDir(), "--max-attempts", "1"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "mask is not supported with the Google Provider") {
+		t.Fatalf("batch mask error = %v", err)
+	}
+}
+
+func TestGoogleEndpointAppendsVersionAndUsesGenerateContent(t *testing.T) {
+	if got := googleEndpoint("https://example.test", "gemini model"); got != "https://example.test/v1beta/models/gemini%20model:generateContent" {
+		t.Fatalf("Google endpoint = %q", got)
+	}
+	if got := googleEndpoint("https://example.test/v1beta/", "model"); got != "https://example.test/v1beta/models/model:generateContent" {
+		t.Fatalf("Google endpoint with version = %q", got)
+	}
+	requestURL, err := googleRequestURL("https://example.test/v1beta/models/model:generateContent", "a key")
+	if err != nil || requestURL != "https://example.test/v1beta/models/model:generateContent?key=a+key" {
+		t.Fatalf("Google request URL = %q, error = %v", requestURL, err)
+	}
+}
+
+func TestDecodeGoogleResponseRequiresExactlyOneImage(t *testing.T) {
+	one := `{"candidates":[{"content":{"parts":[{"text":"caption"},{"inlineData":{"data":"aGVsbG8="}}]}}]}`
+	images, err := decodeGoogleResponse([]byte(one))
+	if err != nil || len(images) != 1 || string(images[0]) != "hello" {
+		t.Fatalf("one image = %q, error = %v", images, err)
+	}
+	for name, response := range map[string]string{
+		"zero":  `{"candidates":[{"content":{"parts":[{"text":"no image"}]}}]}`,
+		"multi": `{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aA=="}},{"inlineData":{"data":"Yg=="}}]}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			images, err := decodeGoogleResponse([]byte(response))
+			if err == nil || !strings.Contains(err.Error(), "image") || images != nil {
+				t.Fatalf("decode result = %q, error = %v", images, err)
+			}
+		})
 	}
 }
 
@@ -1201,7 +1269,7 @@ func TestGoogleProviderFailuresUseCommonRetryRules(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+		fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"data":%q}}]}}]}`, png)
 	}))
 	defer server.Close()
 	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"google-key","model":"google-model"}}}`, server.URL))
@@ -1243,7 +1311,7 @@ func TestGoogleProviderBatchUsesCommonOutputAndSummary(t *testing.T) {
 			t.Errorf("batch Google API key = %q, want batch-google-key", r.URL.Query().Get("key"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+		fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"data":%q}}]}}]}`, png)
 	}))
 	defer server.Close()
 	writeUserConfig(t, fmt.Sprintf(`{"defaultProvider":"google","providers":{"google":{"baseURL":%q,"apiKey":"batch-google-key","model":"batch-google-model"}}}`, server.URL))
@@ -1271,7 +1339,7 @@ func TestExplicitGoogleProviderDoesNotUseOpenAIConfiguration(t *testing.T) {
 	googleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		googleRequests++
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"predictions":[{"bytesBase64Encoded":%q}]}`, png)
+		fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"data":%q}}]}}]}`, png)
 	}))
 	defer googleServer.Close()
 	openAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
