@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	defaultModel            = "gpt-image-2"
 	defaultSize             = "auto"
 	defaultQuality          = "auto"
 	defaultOutDir           = "output/imagegen"
@@ -33,18 +32,19 @@ const (
 	retryMaxDelay           = 30 * time.Second
 )
 
-var retryable = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true, 524: true}
-
 type commonArgs struct {
-	baseURL     string
-	model       string
-	size        string
-	quality     string
-	outDir      string
-	force       bool
-	dryRun      bool
-	maxAttempts int
-	timeout     time.Duration
+	provider        string
+	baseURL         string
+	baseURLOverride string
+	apiKey          string
+	model           string
+	size            string
+	quality         string
+	outDir          string
+	force           bool
+	dryRun          bool
+	maxAttempts     int
+	timeout         time.Duration
 }
 
 type apiResponse struct {
@@ -56,6 +56,7 @@ type apiResponse struct {
 
 type batchJob struct {
 	Operation string   `json:"operation"`
+	Provider  string   `json:"provider,omitempty"`
 	Prompt    string   `json:"prompt"`
 	Images    []string `json:"image,omitempty"`
 	Mask      string   `json:"mask,omitempty"`
@@ -75,9 +76,144 @@ func endpoint(base, operation string) string {
 	return base + "/images/" + operation
 }
 
+type providerConfig struct {
+	BaseURL string `json:"baseURL"`
+	APIKey  string `json:"apiKey"`
+	Model   string `json:"model"`
+}
+
+type userConfig struct {
+	DefaultProvider string                    `json:"defaultProvider"`
+	Providers       map[string]providerConfig `json:"providers"`
+}
+
+func configFilePath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("could not locate the user configuration directory: %w", err)
+	}
+	return filepath.Join(dir, "tutu-skills", "img-gen", "config.json"), nil
+}
+
+func initializationGuidance(path, problem string) error {
+	return fmt.Errorf("%s; run `img-gen init` to create a user-level template at %s, fill the provider credentials locally, and retry", problem, path)
+}
+
+func selectProvider(args commonArgs, explicit string) (commonArgs, error) {
+	path, err := configFilePath()
+	if err != nil {
+		return args, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return args, initializationGuidance(path, "img-gen Provider Configuration is missing")
+		}
+		return args, initializationGuidance(path, fmt.Sprintf("could not read img-gen Provider Configuration %s", path))
+	}
+	var config userConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return args, initializationGuidance(path, fmt.Sprintf("img-gen Provider Configuration %s is invalid JSON: %v", path, err))
+	}
+	provider := strings.TrimSpace(explicit)
+	if provider == "" {
+		provider = strings.TrimSpace(config.DefaultProvider)
+	}
+	if provider == "" {
+		return args, initializationGuidance(path, "no Provider selected; pass --provider or set defaultProvider")
+	}
+	if provider != "openai" && provider != "google" {
+		return args, fmt.Errorf("unsupported Provider %q; supported Providers: openai, google", provider)
+	}
+	selected, ok := config.Providers[provider]
+	if !ok {
+		return args, initializationGuidance(path, fmt.Sprintf("Provider Configuration for %q is missing", provider))
+	}
+	if strings.TrimSpace(selected.BaseURL) == "" || strings.TrimSpace(selected.APIKey) == "" || strings.TrimSpace(selected.Model) == "" {
+		return args, initializationGuidance(path, fmt.Sprintf("Provider Configuration for %q is incomplete", provider))
+	}
+	args.provider = provider
+	args.baseURL = strings.TrimSpace(selected.BaseURL)
+	if strings.TrimSpace(args.baseURLOverride) != "" {
+		args.baseURL = strings.TrimSpace(args.baseURLOverride)
+	}
+	args.apiKey = strings.TrimSpace(selected.APIKey)
+	args.model = strings.TrimSpace(selected.Model)
+	return args, nil
+}
+
+func templateConfig() userConfig {
+	return userConfig{
+		DefaultProvider: "openai",
+		Providers: map[string]providerConfig{
+			"openai": {
+				BaseURL: "https://api.openai.com",
+				Model:   "gpt-image-1",
+			},
+			"google": {
+				BaseURL: "https://generativelanguage.googleapis.com",
+				Model:   "imagen-3.0-generate-002",
+			},
+		},
+	}
+}
+
+func writeConfigTemplate(force bool) (string, error) {
+	path, err := configFilePath()
+	if err != nil {
+		return "", err
+	}
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return "", fmt.Errorf("img-gen Provider Configuration already exists at %s; refusing to overwrite it", path)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("could not inspect img-gen Provider Configuration %s: %w", path, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("could not create user configuration directory: %w", err)
+	}
+	data, err := json.MarshalIndent(templateConfig(), "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("could not encode Provider Configuration template: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return "", fmt.Errorf("could not write Provider Configuration template: %w", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return "", fmt.Errorf("could not secure Provider Configuration template: %w", err)
+	}
+	return path, nil
+}
+
+func runInit(argv []string, output io.Writer) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	force := false
+	fs.BoolVar(&force, "force", false, "replace an existing user-level Provider Configuration template")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("init does not accept positional arguments")
+	}
+	path, err := writeConfigTemplate(force)
+	if err != nil {
+		return err
+	}
+	return writeJSON(output, map[string]any{
+		"created": true,
+		"path":    path,
+		"message": "Provider Configuration template created; fill the provider credentials locally before running an image task",
+	})
+}
+
 func validateCommon(args commonArgs) error {
+	if strings.TrimSpace(args.provider) == "" {
+		return errors.New("Provider Selection is required")
+	}
 	if strings.TrimSpace(args.baseURL) == "" {
-		return errors.New("IMAGE_API_BASE_URL is not set; set it locally or pass --base-url, then retry")
+		return errors.New("Provider Configuration baseURL is empty")
 	}
 	if args.maxAttempts < 1 {
 		return errors.New("--max-attempts must be at least 1")
@@ -147,38 +283,6 @@ func checkOutputs(paths []string, force bool) error {
 	return nil
 }
 
-func apiKey() (string, error) {
-	key := strings.TrimSpace(os.Getenv("IMAGE_API_KEY"))
-	if key == "" {
-		return "", errors.New("IMAGE_API_KEY is not set; set it locally, then retry")
-	}
-	return key, nil
-}
-
-func maxAttemptsFromEnv() (int, error) {
-	raw := strings.TrimSpace(os.Getenv("IMAGE_API_MAX_ATTEMPTS"))
-	if raw == "" {
-		return defaultMaxAttempts, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 {
-		return 0, errors.New("IMAGE_API_MAX_ATTEMPTS must be a positive integer")
-	}
-	return value, nil
-}
-
-func batchConcurrencyFromEnv() (int, error) {
-	raw := strings.TrimSpace(os.Getenv("IMAGE_API_BATCH_CONCURRENCY"))
-	if raw == "" {
-		return defaultBatchConcurrency, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 {
-		return 0, errors.New("IMAGE_API_BATCH_CONCURRENCY must be a positive integer")
-	}
-	return value, nil
-}
-
 func retryAfterDelay(value string) (time.Duration, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -223,6 +327,26 @@ func retryDelay(retryAfter string, attempt int) time.Duration {
 	return time.Duration(float64(delay) * (0.8 + rand.Float64()*0.4))
 }
 
+// apiError is a Provider execution failure carrying a safe message. Status is
+// the HTTP status the Provider returned, or 0 for network and timeout failures,
+// which have no HTTP status.
+type apiError struct {
+	Status  int
+	message string
+}
+
+func (e *apiError) Error() string { return e.message }
+
+// apiStatus reports the HTTP status carried by an execution error, or 0 when
+// the failure has no HTTP status.
+func apiStatus(err error) int {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status
+	}
+	return 0
+}
+
 func doRequest(client *http.Client, makeRequest func() (*http.Request, error), maxAttempts int) ([]byte, error) {
 	var last string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -242,8 +366,10 @@ func doRequest(client *http.Client, makeRequest func() (*http.Request, error), m
 				return body, nil
 			}
 			last = fmt.Sprintf("API request failed with HTTP %d", resp.StatusCode)
-			if !retryable[resp.StatusCode] || attempt == maxAttempts {
-				return nil, errors.New(last)
+			// One unified rule: HTTP 5xx retries within the bounded attempts;
+			// every other status, including every 4xx, fails on this attempt.
+			if resp.StatusCode < 500 || attempt == maxAttempts {
+				return nil, &apiError{Status: resp.StatusCode, message: last}
 			}
 			delay := retryDelay(retryAfter, attempt)
 			fmt.Fprintf(os.Stderr, "attempt %d/%d failed with HTTP %d; retrying in %s\n", attempt, maxAttempts, resp.StatusCode, delay.Round(time.Millisecond))
@@ -251,14 +377,14 @@ func doRequest(client *http.Client, makeRequest func() (*http.Request, error), m
 		} else {
 			last = "API request failed: network error or timeout"
 			if attempt == maxAttempts {
-				return nil, errors.New(last)
+				return nil, &apiError{message: last}
 			}
 			delay := retryDelay("", attempt)
 			fmt.Fprintf(os.Stderr, "attempt %d/%d failed with a network error or timeout; retrying in %s\n", attempt, maxAttempts, delay.Round(time.Millisecond))
 			time.Sleep(delay)
 		}
 	}
-	return nil, errors.New(last)
+	return nil, &apiError{message: last}
 }
 
 func decodeResponse(raw []byte, client *http.Client) ([][]byte, error) {
@@ -318,9 +444,141 @@ func saveImages(images [][]byte, paths []string) ([]string, error) {
 	return abs, nil
 }
 
+func googleEndpoint(base, model string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if !strings.HasSuffix(base, "/v1beta") {
+		base += "/v1beta"
+	}
+	return base + "/models/" + url.PathEscape(model) + ":predict"
+}
+
+func googleRequestURL(endpoint, key string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Google Provider Configuration baseURL: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("key", key)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func googlePayload(prompt string) map[string]any {
+	return map[string]any{
+		"instances":  []map[string]any{{"prompt": prompt}},
+		"parameters": map[string]any{"sampleCount": 1},
+	}
+}
+
+func decodeGoogleResponse(raw []byte) ([][]byte, error) {
+	var result struct {
+		Predictions []struct {
+			BytesBase64Encoded string `json:"bytesBase64Encoded"`
+		} `json:"predictions"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, errors.New("Google API returned invalid JSON")
+	}
+	if len(result.Predictions) == 0 {
+		return nil, errors.New("Google API response contains no image data")
+	}
+	images := make([][]byte, 0, len(result.Predictions))
+	for _, prediction := range result.Predictions {
+		if prediction.BytesBase64Encoded == "" {
+			return nil, errors.New("Google API image entry contains no bytesBase64Encoded data")
+		}
+		data, err := base64.StdEncoding.DecodeString(prediction.BytesBase64Encoded)
+		if err != nil {
+			return nil, errors.New("Google API returned invalid base64 image data")
+		}
+		images = append(images, data)
+	}
+	return images, nil
+}
+
+func googleImagesPayload(prompt string, imagePaths []string, mask string) (map[string]any, error) {
+	encodedImages := make([]string, len(imagePaths))
+	for i, path := range imagePaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("could not read input image: %w", err)
+		}
+		encodedImages[i] = base64.StdEncoding.EncodeToString(data)
+	}
+	instance := map[string]any{"prompt": prompt}
+	if len(encodedImages) == 1 {
+		instance["image"] = map[string]string{"bytesBase64Encoded": encodedImages[0]}
+	} else {
+		images := make([]map[string]string, len(encodedImages))
+		for i, encoded := range encodedImages {
+			images[i] = map[string]string{"bytesBase64Encoded": encoded}
+		}
+		instance["images"] = images
+	}
+	if mask != "" {
+		data, err := os.ReadFile(mask)
+		if err != nil {
+			return nil, fmt.Errorf("could not read mask: %w", err)
+		}
+		instance["mask"] = map[string]any{"image": map[string]string{"bytesBase64Encoded": base64.StdEncoding.EncodeToString(data)}}
+	}
+	return map[string]any{
+		"instances":  []map[string]any{instance},
+		"parameters": map[string]any{"sampleCount": 1},
+	}, nil
+}
+
+func googleExecute(payload map[string]any, args commonArgs) ([][]byte, error) {
+	ep := googleEndpoint(args.baseURL, args.model)
+	requestURL, err := googleRequestURL(ep, strings.TrimSpace(args.apiKey))
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("could not encode Google request: %w", err)
+	}
+	client := &http.Client{Timeout: args.timeout}
+	raw, err := doRequest(client, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, requestURL, bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return req, err
+	}, args.maxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGoogleResponse(raw)
+}
+
+func googleGenerate(prompt, out string, args commonArgs) (map[string]any, error) {
+	paths := outputPaths(out, args.outDir, prompt)
+	if err := checkOutputs(paths, args.force); err != nil {
+		return nil, err
+	}
+	payload := googlePayload(prompt)
+	ep := googleEndpoint(args.baseURL, args.model)
+	if args.dryRun {
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "payload": payload, "outputs": paths}, nil
+	}
+	images, err := googleExecute(payload, args)
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := saveImages(images, paths)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+}
+
 func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 	if err := validateCommon(args); err != nil {
 		return nil, err
+	}
+	if args.provider == "google" {
+		return googleGenerate(prompt, out, args)
 	}
 	paths := outputPaths(out, args.outDir, prompt)
 	if err := checkOutputs(paths, args.force); err != nil {
@@ -329,12 +587,9 @@ func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 	ep := endpoint(args.baseURL, "generations")
 	payload := map[string]any{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": 1}
 	if args.dryRun {
-		return map[string]any{"dry_run": true, "endpoint": ep, "payload": payload, "outputs": paths}, nil
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "payload": payload, "outputs": paths}, nil
 	}
-	key, err := apiKey()
-	if err != nil {
-		return nil, err
-	}
+	key := strings.TrimSpace(args.apiKey)
 	body, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: args.timeout}
 	raw, err := doRequest(client, func() (*http.Request, error) {
@@ -356,12 +611,15 @@ func generate(prompt, out string, args commonArgs) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
 }
 
 func edit(prompt string, imagePaths []string, mask, out string, args commonArgs) (map[string]any, error) {
 	if err := validateCommon(args); err != nil {
 		return nil, err
+	}
+	if args.provider == "google" {
+		return googleEdit(prompt, imagePaths, mask, out, args)
 	}
 	for _, path := range append(append([]string{}, imagePaths...), mask) {
 		if path == "" {
@@ -378,12 +636,9 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 	ep := endpoint(args.baseURL, "edits")
 	fields := map[string]string{"model": args.model, "prompt": prompt, "size": args.size, "quality": args.quality, "n": "1"}
 	if args.dryRun {
-		return map[string]any{"dry_run": true, "endpoint": ep, "fields": fields, "images": imagePaths, "mask": mask, "outputs": paths}, nil
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "fields": fields, "images": imagePaths, "mask": mask, "outputs": paths}, nil
 	}
-	key, err := apiKey()
-	if err != nil {
-		return nil, err
-	}
+	key := strings.TrimSpace(args.apiKey)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	for name, value := range fields {
@@ -442,7 +697,39 @@ func edit(prompt string, imagePaths []string, mask, out string, args commonArgs)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
+}
+
+func googleEdit(prompt string, imagePaths []string, mask, out string, args commonArgs) (map[string]any, error) {
+	for _, path := range append(append([]string{}, imagePaths...), mask) {
+		if path == "" {
+			continue
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			return nil, fmt.Errorf("input file not found: %s", path)
+		}
+	}
+	paths := outputPaths(out, args.outDir, prompt)
+	if err := checkOutputs(paths, args.force); err != nil {
+		return nil, err
+	}
+	payload, err := googleImagesPayload(prompt, imagePaths, mask)
+	if err != nil {
+		return nil, err
+	}
+	ep := googleEndpoint(args.baseURL, args.model)
+	if args.dryRun {
+		return map[string]any{"dry_run": true, "provider": args.provider, "model": args.model, "endpoint": ep, "payload": payload, "images": imagePaths, "mask": mask, "outputs": paths}, nil
+	}
+	images, err := googleExecute(payload, args)
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := saveImages(images, paths)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": args.provider, "model": args.model, "size": args.size, "quality": args.quality, "outputs": outputs}, nil
 }
 
 func writeJSON(w io.Writer, value any) error {
@@ -457,16 +744,11 @@ func writeJSON(w io.Writer, value any) error {
 
 func parseCommon(fs *flag.FlagSet, argv []string, args *commonArgs) error {
 	var timeout float64
-	maxAttempts, err := maxAttemptsFromEnv()
-	if err != nil {
-		return err
-	}
-	model := strings.TrimSpace(os.Getenv("IMAGE_API_MODEL"))
-	if model == "" {
-		model = defaultModel
-	}
-	fs.StringVar(&args.baseURL, "base-url", strings.TrimSpace(os.Getenv("IMAGE_API_BASE_URL")), "OpenAI-compatible API base URL")
-	fs.StringVar(&args.model, "model", model, "image model")
+	maxAttempts := defaultMaxAttempts
+	fs.StringVar(&args.provider, "provider", "", "Provider Selection (for example, openai)")
+	// --base-url is retained as an explicit endpoint override for local gateways;
+	// it never selects a Provider and is never populated from environment variables.
+	fs.StringVar(&args.baseURLOverride, "base-url", "", "explicit selected Provider endpoint override")
 	fs.StringVar(&args.size, "size", defaultSize, "auto or WIDTHxHEIGHT")
 	fs.StringVar(&args.quality, "quality", defaultQuality, "low, medium, high, or auto")
 	fs.StringVar(&args.outDir, "out-dir", defaultOutDir, "default output directory")
@@ -499,13 +781,18 @@ func runGenerate(argv []string, output io.Writer) error {
 	if err := parseCommon(fs, argv, &args); err != nil {
 		return err
 	}
+	var err error
+	args, err = selectProvider(args, args.provider)
+	if err != nil {
+		return reportFailure(output, args, err)
+	}
 	finalPrompt, err := promptValue(prompt, promptFile)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	result, err := generate(finalPrompt, out, args)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	return writeJSON(output, result)
 }
@@ -523,26 +810,55 @@ func runEdit(argv []string, output io.Writer) error {
 	if err := parseCommon(fs, argv, &args); err != nil {
 		return err
 	}
+	var err error
+	args, err = selectProvider(args, args.provider)
+	if err != nil {
+		return reportFailure(output, args, err)
+	}
 	if len(images) == 0 {
-		return errors.New("provide at least one --image")
+		return reportFailure(output, args, errors.New("provide at least one --image"))
 	}
 	finalPrompt, err := promptValue(prompt, promptFile)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	result, err := edit(finalPrompt, images, mask, out, args)
 	if err != nil {
-		return err
+		return reportFailure(output, args, err)
 	}
 	return writeJSON(output, result)
+}
+
+// failureResult is the stable JSON result of a failed single-image operation:
+// the selected Provider, Model, the HTTP status when the Provider returned one,
+// and a safe message. Batch job summaries reuse these fields for failed jobs.
+type failureResult struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Status   int    `json:"status,omitempty"`
+	Error    string `json:"error"`
+}
+
+// reportFailure writes the stable failure result for a failed single-image
+// operation and returns the execution error so the command still exits nonzero
+// with its original message.
+func reportFailure(w io.Writer, args commonArgs, err error) error {
+	result := failureResult{Provider: args.provider, Model: args.model, Status: apiStatus(err), Error: err.Error()}
+	if writeErr := writeJSON(w, result); writeErr != nil {
+		return errors.Join(err, writeErr)
+	}
+	return err
 }
 
 type batchResult struct {
 	Index     int            `json:"index"`
 	Operation string         `json:"operation"`
+	Provider  string         `json:"provider,omitempty"`
+	Model     string         `json:"model,omitempty"`
 	OK        bool           `json:"ok"`
 	Outputs   []string       `json:"outputs,omitempty"`
 	Data      map[string]any `json:"data,omitempty"`
+	Status    int            `json:"status,omitempty"`
 	Error     string         `json:"error,omitempty"`
 }
 
@@ -621,16 +937,6 @@ func validateBatchOutput(path string, force bool) error {
 	return nil
 }
 
-func batchConcurrencyFlag(fs *flag.FlagSet) bool {
-	set := false
-	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == "concurrency" {
-			set = true
-		}
-	})
-	return set
-}
-
 func runBatch(argv []string, output io.Writer) error {
 	fs := flag.NewFlagSet("batch", flag.ContinueOnError)
 	var input string
@@ -643,13 +949,7 @@ func runBatch(argv []string, output io.Writer) error {
 	if err := parseCommon(fs, argv, &args); err != nil {
 		return err
 	}
-	if !batchConcurrencyFlag(fs) {
-		var err error
-		concurrency, err = batchConcurrencyFromEnv()
-		if err != nil {
-			return err
-		}
-	}
+
 	if input == "" || concurrency < 1 {
 		return errors.New("--input is required and --concurrency must be at least 1")
 	}
@@ -725,10 +1025,23 @@ func runBatch(argv []string, output io.Writer) error {
 	}
 	batchDir := filepath.Dir(batchPath)
 	resolved := make([]string, len(jobs))
+	resolvedArgs := make([]commonArgs, len(jobs))
 	seen := make(map[string]int, len(jobs))
 	for i := range jobs {
 		job := &jobs[i]
-		jobArgs := batchJobArgs(*job, args)
+		// Resolve the Provider Configuration first: the job-level provider
+		// overrides the command's --provider, which overrides defaultProvider.
+		// Job-level model, size, and quality then apply within the selected
+		// Provider without changing the Provider Selection.
+		explicit := strings.TrimSpace(job.Provider)
+		if explicit == "" {
+			explicit = args.provider
+		}
+		jobArgs, err := selectProvider(args, explicit)
+		if err != nil {
+			return fmt.Errorf("batch line %d: %w", i+1, err)
+		}
+		jobArgs = batchJobArgs(*job, jobArgs)
 		if err := validateCommon(jobArgs); err != nil {
 			return fmt.Errorf("batch line %d is invalid: %w", i+1, err)
 		}
@@ -765,6 +1078,7 @@ func runBatch(argv []string, output io.Writer) error {
 			return fmt.Errorf("batch line %d: %w", i+1, err)
 		}
 		resolved[i] = path
+		resolvedArgs[i] = jobArgs
 	}
 
 	results := make([]batchResult, len(jobs))
@@ -778,7 +1092,7 @@ func runBatch(argv []string, output io.Writer) error {
 		active++
 		go func() {
 			job := jobs[index]
-			jobArgs := batchJobArgs(job, args)
+			jobArgs := resolvedArgs[index]
 			var data map[string]any
 			var err error
 			if job.Operation == "edit" {
@@ -801,9 +1115,10 @@ func runBatch(argv []string, output io.Writer) error {
 	for active > 0 {
 		finished := <-done
 		active--
-		result := batchResult{Index: finished.index + 1, Operation: jobs[finished.index].Operation, OK: finished.err == nil, Data: finished.data}
+		result := batchResult{Index: finished.index + 1, Operation: jobs[finished.index].Operation, Provider: resolvedArgs[finished.index].provider, Model: resolvedArgs[finished.index].model, OK: finished.err == nil, Data: finished.data}
 		if finished.err != nil {
 			result.Error = finished.err.Error()
+			result.Status = apiStatus(finished.err)
 			failed = true
 		} else if outputs, ok := finished.data["outputs"].([]string); ok {
 			result.Outputs = outputs
@@ -816,7 +1131,7 @@ func runBatch(argv []string, output io.Writer) error {
 	}
 	if failFast && failed {
 		for index := next; index < len(jobs); index++ {
-			results[index] = batchResult{Index: index + 1, Operation: jobs[index].Operation, Error: "not started because fail-fast was triggered"}
+			results[index] = batchResult{Index: index + 1, Operation: jobs[index].Operation, Provider: resolvedArgs[index].provider, Model: resolvedArgs[index].model, Error: "not started because fail-fast was triggered"}
 		}
 	}
 
@@ -843,7 +1158,7 @@ func runBatch(argv []string, output io.Writer) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: img-gen <generate|edit|batch> [options]")
+	fmt.Fprintln(os.Stderr, "Usage: img-gen <init|generate|edit|batch> [options]")
 }
 
 func main() {
@@ -853,6 +1168,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "init":
+		err = runInit(os.Args[2:], os.Stdout)
 	case "generate":
 		err = runGenerate(os.Args[2:], os.Stdout)
 	case "edit":

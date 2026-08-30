@@ -28,6 +28,89 @@ func requireDocFragments(t *testing.T, doc string, fragments ...string) {
 	}
 }
 
+func TestProviderReferenceDocumentsOpenAIFactsOnly(t *testing.T) {
+	data, err := os.ReadFile("../references/providers/openai.md")
+	if err != nil {
+		t.Fatalf("read OpenAI Provider reference: %v", err)
+	}
+	doc := string(data)
+	requireDocFragments(t, doc, "# OpenAI Provider", "baseURL", "apiKey", "model", "/v1/images/generations", "/v1/images/edits", "b64_json")
+	if strings.Contains(doc, "IMAGE_API_") || strings.Contains(doc, "--concurrency") || strings.Contains(doc, "chmod +x") {
+		t.Fatal("OpenAI Provider reference duplicates common troubleshooting rules")
+	}
+}
+
+func TestProviderReferenceDocumentsGoogleFactsOnly(t *testing.T) {
+	data, err := os.ReadFile("../references/providers/google.md")
+	if err != nil {
+		t.Fatalf("read Google Provider reference: %v", err)
+	}
+	doc := string(data)
+	requireDocFragments(t, doc, "# Google Provider", "baseURL", "apiKey", "model", "/v1beta/models/<model>:predict", "instances", "predictions", "bytesBase64Encoded")
+	if strings.Contains(doc, "IMAGE_API_") || strings.Contains(doc, "--concurrency") || strings.Contains(doc, "chmod +x") || strings.Contains(doc, "common troubleshooting") {
+		t.Fatal("Google Provider reference duplicates common troubleshooting rules")
+	}
+}
+
+func TestCommonTroubleshootingIsTheFirstFailureReference(t *testing.T) {
+	data, err := os.ReadFile("../references/troubleshooting.md")
+	if err != nil {
+		t.Fatalf("read troubleshooting reference: %v", err)
+	}
+	doc := string(data)
+	requireDocFragments(t, doc,
+		"first reference after every",
+		"missing or unusable Provider Configuration",
+		"run `<img-gen> init`",
+		"permission-denied error",
+		"network failures, timeouts",
+		"all HTTP `5xx`",
+		"Do not retry any `4xx`",
+		"one global worker pool",
+		"--fail-fast",
+	)
+	if strings.Contains(doc, "test-key") || strings.Contains(doc, "json-key") || strings.Contains(doc, "google-key") {
+		t.Fatal("common troubleshooting contains a test or credential value")
+	}
+}
+
+func TestProviderReferencesExcludeCommonFailureRules(t *testing.T) {
+	for _, provider := range []string{"openai", "google"} {
+		data, err := os.ReadFile("../references/providers/" + provider + ".md")
+		if err != nil {
+			t.Fatalf("read %s Provider reference: %v", provider, err)
+		}
+		doc := strings.ToLower(string(data))
+		for _, fragment := range []string{"permission", "chmod", "network", "timeout", "retry", "concurrency", "batch"} {
+			if strings.Contains(doc, fragment) {
+				t.Errorf("%s Provider reference duplicates common failure rule %q", provider, fragment)
+			}
+		}
+	}
+}
+
+func TestSkillDocumentsDeclareProgressiveReferenceDisclosure(t *testing.T) {
+	skill, _ := readSkillContract(t)
+	requireDocFragments(t, skill,
+		"Normal `generate`, `edit`, and `batch` tasks do not read any reference document",
+		"Do not pre-check configuration",
+		"Read [references/troubleshooting.md](references/troubleshooting.md) first after every failure",
+		"If common troubleshooting resolves the failure, stop there and do not read a Provider reference",
+		"Read only the current Provider's reference",
+		"OpenAI failures read only `references/providers/openai.md`",
+		"Google failures read only `references/providers/google.md`",
+	)
+	retiredBatchCommand := "generate" + "-batch"
+	if strings.Contains(skill, retiredBatchCommand) {
+		t.Fatal("SKILL.md retains the retired batch command name")
+	}
+}
+
+func TestSkillDocumentsDeclareGoogleProviderContract(t *testing.T) {
+	skill, _ := readSkillContract(t)
+	requireDocFragments(t, skill, "OpenAI or Google Provider", `"google":`, "imagen-3.0-generate-002")
+}
+
 func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 	skill, batch := readSkillContract(t)
 	requireDocFragments(t, skill,
@@ -52,7 +135,7 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"Treat the user's prompt as authoritative",
 		"control plane",
 		"execution plane",
-		"Concurrency priority is `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"Batch concurrency is `--concurrency`, or the CLI default of `5`.",
 		"The CLI preflights every operation",
 		"`--fail-fast` stops scheduling jobs not yet started",
 		"deliver each successful output immediately",
@@ -64,7 +147,7 @@ func TestSkillDocumentsDeclareGenerationSetContract(t *testing.T) {
 		"Relative `image` and `mask` paths are resolved",
 		"Relative `out` paths are resolved under the command's `--out-dir`",
 		"The CLI validates every operation",
-		"Concurrency is selected by `--concurrency`, then `IMAGE_API_BATCH_CONCURRENCY`",
+		"Concurrency is selected by `--concurrency`, then the default `5`.",
 		"successful files are kept",
 		"process exits nonzero if any job fails",
 	)
