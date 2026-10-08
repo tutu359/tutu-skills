@@ -10,6 +10,32 @@
 
 **处置**：确认脚本走的是「回首页 → 标记搜索框 → `fill` → `press Enter`」这条路径；如果自己写脚本，不要用 `page.goto` 到搜索 URL 来换关键词，要在结果页的搜索框里改词再回车。
 
+**最容易踩的变体**：关键词**真的查不到**时，页面同样是「没有找到」+ 20 条猜你喜欢，而推荐流用的也是 `a[href*="/item?"]`。如果判断顺序是"先看有没有卡片、再看有没有那句提示"，就会把推荐流当成搜索结果返回，**不报错、静默产出 20 条完全不相关的垃圾数据**。所以判定必须先看提示文案（`xy-search.mjs` 里还要求连续两次都看到提示才算空，避免加载瞬间误判），再看卡片数量。
+
+## evaluate 传了 undefined 参数
+
+**表现**：脚本静默失效，比如"关弹窗/找搜索框"那一步一直返回 false，最后报"没找到搜索框"，但手动看页面明明正常。
+
+**原因**：ego-browser 的 `page.evaluate(fn, arg)` 要求第二个参数可 JSON 序列化，传 `undefined` 会直接抛 `page.evaluate argument must be JSON-serializable`。如果外面包了 try/catch 或重试，这个错误就被吞掉了，表现为功能悄悄不工作。
+
+**处置**：参数为 `undefined` 时改成单参数调用 `page.evaluate(fn)`。`xy-search.mjs` 的 `safeEvaluate` 已经处理了这一点，自己写脚本时注意。
+
+## 回车后立刻读页面报 null
+
+**表现**：`TypeError: Cannot read properties of null (reading 'innerText')`，位置在 `__egoPageEvaluate`。在已经处于搜索结果页时再次搜索、连跑第二次时更容易出现。
+
+**原因**：在搜索框回车会真的换一次文档，切换当口 `document.body` 是 `null`，此时读 `document.body.innerText` 必崩。
+
+**处置**：所有读取页面的 evaluate 都要先判 `if (!document || !document.body) return ...`，并且外层要有重试。`xy-search.mjs` 的 `safeEvaluate` + `waitForResults` 已经覆盖，回车后还会先等 900ms 再开始轮询。
+
+## 价格少了小数、图片是占位图
+
+**表现**：详情写 `¥ 2 .50`，脚本读出来是 `2`；`image` 字段是 `.../tps-2-2.png` 这种图标。
+
+**原因**：闲鱼把价格的整数和小数拆成不同元素渲染，`innerText` 里会多出空格（`¥ 2 .50`），直接正则只匹配到整数；卡片图是懒加载，读太早拿到的是 2x2 占位图。
+
+**处置**：读文本前先做 `replace(/(\d)\s+(?=\.)/g, "$1")` 归一化；图片只认 URL 里含 `/bao/uploaded/` 的，并在读取前留出约 1.2 秒让懒加载完成。
+
 ## 元素看得见点不到
 
 **表现**：`page.click` 报错 `dialog intercepts pointer events` 或 `<div> intercepts pointer events`，元素明明已经渲染。
