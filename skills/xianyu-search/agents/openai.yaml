@@ -1,0 +1,4 @@
+interface:
+  display_name: "xianyu-search"
+  short_description: "Search Xianyu listings and scrape item details without logging in"
+  default_prompt: "Use $xianyu-search to research listings for a keyword on Xianyu and summarize how others sell it."
