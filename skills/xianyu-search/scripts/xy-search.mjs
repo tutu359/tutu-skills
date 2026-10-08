@@ -123,11 +123,15 @@ async function readItems(page, limit) {
       const img = a.querySelector("img");
       const raw = img ? img.currentSrc || img.src || "" : "";
       const image = raw.replace(/(\.jpg).*$/, "$1");
-      const price = (flat.match(/¥\s*([\d.]+)/) || [])[1] || "";
+      // 只在价格元素里取价，避免标题里出现的金额（例如"官网588""¥2.5起"）被当成售价
+      const priceEl = a.querySelector('[class*="row3-wrap-price"], [class*="price-wrap"]');
+      const priceSrc = norm(priceEl ? priceEl.innerText || "" : "");
+      const price = (priceSrc.match(/¥\s*([\d.]+)/) || flat.match(/¥\s*([\d.]+)/) || [])[1] || "";
       const want = (flat.match(/([\d.]+)人想要/) || [])[1] || "";
       return {
         id: (href.match(/[?&]id=(\d+)/) || [])[1] || "",
         title: ((titleEl && titleEl.innerText) || text).replace(/\s+/g, " ").trim(),
+        // 多规格商品在列表里只显示最低档价格，区间要进详情页才有
         price: price ? Number(price) : null,
         want: want ? Number(want) : null,
         url: href,
@@ -157,6 +161,26 @@ async function readDetail(page) {
     };
     const scope = document.querySelector('[class*="item-main-info"]') || document.body;
     const scopeText = norm((scope.innerText || "").replace(/\s+/g, " "));
+    // 多规格商品的售价是一个区间，且渲染在独立的 price 元素里（"14.9 - 99.9"，¥ 在另一个节点）
+    const priceEl = document.querySelector('[class*="price--"]');
+    const priceText = norm(priceEl ? (priceEl.innerText || "").trim() : "");
+    const range = priceText.match(/(\d+(?:\.\d+)?)\s*(?:-|~|～|至|到)\s*(?:¥\s*)?(\d+(?:\.\d+)?)/);
+    const single = priceText.match(/(\d+(?:\.\d+)?)/);
+    let priceMin = null;
+    let priceMax = null;
+    if (range) {
+      priceMin = Math.min(Number(range[1]), Number(range[2]));
+      priceMax = Math.max(Number(range[1]), Number(range[2]));
+    } else if (single) {
+      priceMin = Number(single[1]);
+      priceMax = priceMin;
+    } else {
+      const fallback = scopeText.match(/¥\s*([\d.]+)/);
+      if (fallback) {
+        priceMin = Number(fallback[1]);
+        priceMax = priceMin;
+      }
+    }
     // 描述元素自己也是 desc--xxx，同前缀还有平台提示文字，取最长的那条
     const descs = [...document.querySelectorAll('[class^="desc"], [class*="item-desc"]')]
       .map((n) => (n.innerText || "").replace(/\s+/g, " ").trim())
@@ -177,7 +201,12 @@ async function readDetail(page) {
     return {
       url: location.href,
       title: document.title.replace(/_闲鱼$/, "").trim(),
-      price: (scopeText.match(/¥\s*([\d.]+)/) || [])[1] || "",
+      price: priceMin === null ? "" : String(priceMin),
+      priceMin,
+      priceMax,
+      priceText,
+      // 是否多规格（价格区间）：PC 网页不提供可点击的规格选择器，规格只在描述里
+      hasPriceRange: !!(range && priceMax > priceMin),
       wants: (scopeText.match(/([\d.]+)人想要/) || [])[1] || "",
       views: (scopeText.match(/([\d.]+)浏览/) || [])[1] || "",
       seller: pick('[class*="item-user-info-nick"]'),
